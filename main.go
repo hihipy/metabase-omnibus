@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hihipy/metabase-omnibus/internal/content"
 	"github.com/hihipy/metabase-omnibus/internal/metabase"
 	"github.com/hihipy/metabase-omnibus/internal/schema"
 	"github.com/hihipy/metabase-omnibus/internal/ui"
@@ -26,35 +26,41 @@ var version = "dev"
 const usage = `metabase-omnibus exports a Metabase instance into files built for AI review.
 
 Usage:
-  metabase-omnibus schema [flags]   export the shape of your databases, privacy-safe
-  metabase-omnibus version          print the version
+  metabase-omnibus [flags]           export everything: database shape, then questions and dashboards
+  metabase-omnibus schema [flags]    export only the shape of your databases
+  metabase-omnibus content [flags]   export only questions, models, metrics, and dashboards
+  metabase-omnibus version           print the version
 
 Credentials come from environment variables, never from flags:
   METABASE_URL        https://your-metabase.example.com
   METABASE_API_KEY    preferred
   METABASE_USERNAME   with METABASE_PASSWORD, if you have no API key
 
-Run "metabase-omnibus schema -h" for schema flags.
+Run "metabase-omnibus -h" for flags.
 `
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
+	cmd, args := "all", os.Args[1:]
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		cmd, args = args[0], args[1:]
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	var err error
-	switch os.Args[1] {
+	switch cmd {
+	case "all":
+		err = run(ctx, args, true, true)
 	case "schema":
-		err = runSchema(ctx, os.Args[2:])
-	case "version", "-v", "--version":
+		err = run(ctx, args, true, false)
+	case "content":
+		err = run(ctx, args, false, true)
+	case "version":
 		fmt.Println(version)
-	case "help", "-h", "--help":
+	case "help":
 		fmt.Print(usage)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", cmd, usage)
 		os.Exit(2)
 	}
 	if err != nil {
@@ -63,97 +69,164 @@ func main() {
 	}
 }
 
-func runSchema(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("schema", flag.ContinueOnError)
-	urlFlag := fs.String("url", os.Getenv("METABASE_URL"), "Metabase URL (default: $METABASE_URL)")
-	outPath := fs.String("out", "", `output file, or "-" for the terminal (default: Downloads/metabase-schema-<host>.json)`)
-	dbFlag := fs.String("database", "", "databases to export by ID, name, or glob, comma-separated; skips the database picker")
-	schemaFlag := fs.String("schema", "", `schemas to export by name or glob, comma-separated, e.g. "sales*"; skips the schema picker`)
-	all := fs.Bool("all", false, "export everything without asking (the default when there is no terminal)")
-	plain := fs.Bool("plain", false, "use the typed picker instead of arrow keys")
-	hidden := fs.Bool("include-hidden", false, "include tables and columns an admin hid in Metabase")
-	audit := fs.Bool("include-audit", false, "include Metabase's own usage-analytics database")
-	descriptions := fs.Bool("include-descriptions", false, "include table and column descriptions (free text; off by default)")
-	rows := fs.Bool("row-counts", false, "include estimated row counts (a small count can identify a small group; off by default)")
-	caBundle := fs.String("ca-bundle", "", "PEM file with your organization's CA certificate")
-	allowHTTP := fs.Bool("allow-http", false, "allow plain http:// (local test servers only)")
-	timeout := fs.Duration("timeout", 60*time.Second, "per-request timeout")
+type flags struct {
+	url, out, database, schema, collection, caBundle                           string
+	all, plain, hidden, audit, text, personal, instance, rows, noCompile, http bool
+	timeout                                                                    time.Duration
+}
+
+func run(ctx context.Context, args []string, doSchema, doContent bool) error {
+	var f flags
+	fs := flag.NewFlagSet("metabase-omnibus", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage+"\nFlags:\n"); fs.PrintDefaults() }
+	fs.StringVar(&f.url, "url", os.Getenv("METABASE_URL"), "Metabase URL (default: $METABASE_URL)")
+	fs.StringVar(&f.out, "out", "", "output folder (default: Downloads/metabase-omnibus-<host>)")
+	fs.StringVar(&f.database, "database", "", "databases by ID, name, or glob, comma-separated; skips the database picker")
+	fs.StringVar(&f.schema, "schema", "", `schemas by name or glob, comma-separated, e.g. "sales*"; skips the schema picker`)
+	fs.StringVar(&f.collection, "collection", "", `collections by path glob, comma-separated, e.g. "*Finance*"; skips the collection picker`)
+	fs.BoolVar(&f.all, "all", false, "export everything without asking (the default when there is no terminal)")
+	fs.BoolVar(&f.plain, "plain", false, "use the typed picker instead of arrow keys")
+	fs.BoolVar(&f.hidden, "include-hidden", false, "include tables and columns an admin hid in Metabase")
+	fs.BoolVar(&f.audit, "include-audit", false, "include Metabase's own usage-analytics database")
+	fs.BoolVar(&f.text, "include-descriptions", false, "include descriptions and dashboard text cards (free text; off by default)")
+	fs.BoolVar(&f.personal, "include-personal", false, "include people's personal collections (off by default)")
+	fs.BoolVar(&f.instance, "include-instance", false, "name the Metabase host inside each schema file (off by default)")
+	fs.BoolVar(&f.rows, "row-counts", false, "include estimated row counts (a small count can identify a small group; off by default)")
+	fs.BoolVar(&f.noCompile, "no-compile", false, "skip asking Metabase for the SQL behind query-builder questions")
+	fs.StringVar(&f.caBundle, "ca-bundle", "", "PEM file with your organization's CA certificate")
+	fs.BoolVar(&f.http, "allow-http", false, "allow plain http:// (local test servers only)")
+	fs.DurationVar(&f.timeout, "timeout", 60*time.Second, "per-request timeout")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 		return err
 	}
-	if *urlFlag == "" {
+	if f.url == "" {
 		return errors.New("set METABASE_URL or pass -url")
 	}
-	ask := !*all && ui.Interactive()
-	out := os.Stderr // prompts and progress, kept off stdout so "-out -" stays clean
+	ask := !f.all && ui.Interactive()
+	out := os.Stderr // prompts and progress
 
 	client, err := metabase.New(ctx, metabase.Config{
-		URL:       *urlFlag,
+		URL:       f.url,
 		APIKey:    os.Getenv("METABASE_API_KEY"),
 		Username:  os.Getenv("METABASE_USERNAME"),
 		Password:  os.Getenv("METABASE_PASSWORD"),
-		CABundle:  *caBundle,
-		AllowHTTP: *allowHTTP,
-		Timeout:   *timeout,
+		CABundle:  f.caBundle,
+		AllowHTTP: f.http,
+		Timeout:   f.timeout,
 	})
 	if err != nil {
 		return err
 	}
 	defer client.Close(context.Background())
 
-	// 1. Databases.
-	dbs, err := schema.ListDatabases(ctx, client, *audit)
+	root := f.out
+	if root == "" {
+		root = defaultOut(client.Host())
+	}
+	idx := &index{}
+
+	// Database names label questions, and the schema export's field map lets
+	// the content export name the column each filter points at.
+	dbs, err := schema.ListDatabases(ctx, client, f.audit)
 	if err != nil {
 		return err
 	}
-	if len(dbs) == 0 {
-		return errors.New("these credentials can see no databases")
+	dbNames := map[int]string{}
+	for _, d := range dbs {
+		dbNames[d.ID] = d.Name
 	}
-	switch {
-	case *dbFlag != "":
-		dbs, err = matchDatabases(dbs, *dbFlag)
+	fieldNames := map[int]string{}
+
+	if doSchema {
+		metas, cancelled, err := exportSchema(ctx, client, f, ask, dbs, filepath.Join(root, "schema"), idx, out)
 		if err != nil {
 			return err
 		}
+		if cancelled {
+			fmt.Fprintln(out, ui.Notice("schema export cancelled"))
+		}
+		for _, m := range metas {
+			for id, name := range m.FieldNames() {
+				fieldNames[id] = name
+			}
+		}
+	}
+	if doContent {
+		cancelled, err := exportContent(ctx, client, f, ask, dbNames, fieldNames, filepath.Join(root, "content"), idx, out)
+		if err != nil {
+			return err
+		}
+		if cancelled {
+			fmt.Fprintln(out, ui.Notice("content export cancelled"))
+		}
+	}
+
+	if idx.empty() {
+		fmt.Fprintln(out, ui.Notice("nothing written"))
+		return nil
+	}
+	if err := writeFile(filepath.Join(root, "index.md"), func(w io.Writer) error {
+		_, err := io.WriteString(w, idx.markdown(client.Host(), f.instance))
+		return err
+	}); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, ui.Good("Wrote "+root))
+	fmt.Fprintln(out, ui.Quiet("Start with index.md: it lists every file and what it holds."))
+	return nil
+}
+
+// ---------------------------------------------------------------- schema
+
+func exportSchema(ctx context.Context, client *metabase.Client, f flags, ask bool, dbs []schema.Database,
+	dir string, idx *index, out io.Writer) ([]*schema.Metadata, bool, error) {
+
+	if len(dbs) == 0 {
+		return nil, false, errors.New("these credentials can see no databases")
+	}
+	fmt.Fprintln(out, ui.Bold("\nDatabase shape"))
+	switch {
+	case f.database != "":
+		var err error
+		if dbs, err = matchDatabases(dbs, f.database); err != nil {
+			return nil, false, err
+		}
 	case ask && len(dbs) > 1:
-		fmt.Fprintln(out, ui.Bold(fmt.Sprintf("\n%s: %d databases", client.Host(), len(dbs))))
 		items := make([]ui.Item, len(dbs))
 		for i, d := range dbs {
 			items[i] = ui.Item{Name: d.Name, Detail: d.Engine, Count: "#" + strconv.Itoa(d.ID)}
 		}
-		idx, err := ui.Pick(items, "databases", *plain, out)
-		if err != nil {
-			return err
+		picked, err := ui.Pick(items, "databases", f.plain, out)
+		if err != nil || len(picked) == 0 {
+			return nil, err == nil, err
 		}
-		if len(idx) == 0 {
-			fmt.Fprintln(out, ui.Notice("cancelled, nothing written"))
-			return nil
+		chosen := make([]schema.Database, len(picked))
+		for i, j := range picked {
+			chosen[i] = dbs[j]
 		}
-		dbs = pickDBs(dbs, idx)
+		dbs = chosen
 	}
 
-	// 2. Metadata for each chosen database.
 	metas := make([]*schema.Metadata, 0, len(dbs))
 	for i, d := range dbs {
 		ui.Progress(i, len(dbs), "databases", d.Name)
-		m, err := schema.FetchMetadata(ctx, client, d, *hidden)
+		m, err := schema.FetchMetadata(ctx, client, d, f.hidden)
 		if err != nil {
 			fmt.Fprintln(out)
-			return err
+			return nil, false, err
 		}
 		metas = append(metas, m)
 	}
 	ui.Progress(len(dbs), len(dbs), "databases", "done")
 
-	// 3. Schemas.
-	type pick struct {
+	type choice struct {
 		meta   int
 		schema string
 	}
-	var choices []pick
+	var choices []choice
 	var items []ui.Item
 	for mi, m := range metas {
 		for _, s := range m.Schemas() {
@@ -161,104 +234,221 @@ func runSchema(ctx context.Context, args []string) error {
 			if len(metas) > 1 {
 				name = m.DB.Name + "/" + s.Name
 			}
-			choices = append(choices, pick{mi, s.Name})
+			choices = append(choices, choice{mi, s.Name})
 			items = append(items, ui.Item{Name: name, Count: plural(s.Tables, "table")})
 		}
 	}
 	if len(choices) == 0 {
-		return errors.New("the chosen databases have no tables these credentials can see")
+		return metas, false, errors.New("the chosen databases have no tables these credentials can see")
 	}
 	chosen := make([]int, len(choices))
 	for i := range chosen {
 		chosen[i] = i
 	}
 	switch {
-	case *schemaFlag != "":
+	case f.schema != "":
 		chosen = chosen[:0]
-		patterns := splitList(*schemaFlag)
 		for i, c := range choices {
-			for _, p := range patterns {
-				if ui.MatchName(p, c.schema) {
-					chosen = append(chosen, i)
-					break
-				}
+			if matchAny(f.schema, c.schema) {
+				chosen = append(chosen, i)
 			}
 		}
 		if len(chosen) == 0 {
-			return fmt.Errorf("no schema matches %q", *schemaFlag)
+			return metas, false, fmt.Errorf("no schema matches %q", f.schema)
 		}
 	case ask && len(choices) > 1:
-		fmt.Fprintln(out, ui.Bold(fmt.Sprintf("\n%d schemas", len(choices))))
-		chosen, err = ui.Pick(items, "schemas", *plain, out)
-		if err != nil {
-			return err
-		}
-		if len(chosen) == 0 {
-			fmt.Fprintln(out, ui.Notice("cancelled, nothing written"))
-			return nil
+		var err error
+		if chosen, err = ui.Pick(items, "schemas", f.plain, out); err != nil || len(chosen) == 0 {
+			return metas, err == nil, err
 		}
 	}
 
-	keep := make([]map[string]bool, len(metas))
-	for i := range keep {
-		keep[i] = map[string]bool{}
+	opt := schema.Options{IncludeDescriptions: f.text, RowCounts: f.rows}
+	if f.instance {
+		opt.Instance = client.Host()
 	}
 	for _, i := range chosen {
-		keep[choices[i].meta][choices[i].schema] = true
+		c := choices[i]
+		m := metas[c.meta]
+		doc := schema.Build(m, c.schema, opt)
+		rel := filepath.Join(safeName(m.DB.Name), safeName(c.schema)+".json")
+		if err := os.MkdirAll(filepath.Join(dir, safeName(m.DB.Name)), 0o755); err != nil {
+			return metas, false, err
+		}
+		if err := writeFile(filepath.Join(dir, rel), func(w io.Writer) error { return schema.WriteDoc(w, doc) }); err != nil {
+			return metas, false, err
+		}
+		idx.schemas = append(idx.schemas, indexRow{
+			file: filepath.ToSlash(filepath.Join("schema", rel)),
+			what: fmt.Sprintf("%s, schema %s: %s", m.DB.Name, c.schema, plural(len(doc.Tables), "table")),
+		})
+	}
+	fmt.Fprintf(out, "  %s\n", plural(len(chosen), "schema file"))
+	return metas, false, nil
+}
+
+// ---------------------------------------------------------------- content
+
+func exportContent(ctx context.Context, client *metabase.Client, f flags, ask bool, dbNames, fieldNames map[int]string,
+	dir string, idx *index, out io.Writer) (bool, error) {
+
+	fmt.Fprintln(out, ui.Bold("\nQuestions and dashboards"))
+	cat, err := content.List(ctx, client, f.personal)
+	if err != nil {
+		return false, err
 	}
 
-	// 4. Build and write.
-	opt := schema.Options{Instance: client.Host(), IncludeDescriptions: *descriptions, RowCounts: *rows}
-	var docs []schema.Doc
-	for i, m := range metas {
-		if len(keep[i]) > 0 {
-			docs = append(docs, schema.Build(m, keep[i], opt))
+	var cols []content.Collection
+	var items []ui.Item
+	for _, c := range cat.Collections {
+		cards, dashes := cat.Counts(c.ID)
+		if cards+dashes == 0 {
+			continue
+		}
+		cols = append(cols, c)
+		items = append(items, ui.Item{Name: c.Path, Count: plural(dashes, "dashboard") + ", " + plural(cards, "question")})
+	}
+	if len(cols) == 0 {
+		fmt.Fprintln(out, ui.Notice("  no questions or dashboards visible to these credentials"))
+		return false, nil
+	}
+
+	chosen := make([]int, len(cols))
+	for i := range chosen {
+		chosen[i] = i
+	}
+	switch {
+	case f.collection != "":
+		chosen = chosen[:0]
+		for i, c := range cols {
+			if matchAny(f.collection, c.Path) {
+				chosen = append(chosen, i)
+			}
+		}
+		if len(chosen) == 0 {
+			return false, fmt.Errorf("no collection matches %q", f.collection)
+		}
+	case ask && len(cols) > 1:
+		if chosen, err = ui.Pick(items, "collections", f.plain, out); err != nil || len(chosen) == 0 {
+			return err == nil, err
 		}
 	}
-
-	path := *outPath
-	if path == "" {
-		path = defaultOut(client.Host())
+	keep := map[int]bool{}
+	for _, i := range chosen {
+		keep[cols[i].ID] = true
 	}
-	if err := writeJSON(path, docs); err != nil {
+
+	files, snippets, err := content.Export(ctx, client, cat, keep, content.Options{
+		IncludeText: f.text,
+		NoCompile:   f.noCompile,
+		FieldNames:  fieldNames,
+		DBNames:     dbNames,
+		Progress:    func(done, total int, label string) { ui.Progress(done, total, "items", label) },
+	})
+	if err != nil {
+		fmt.Fprintln(out)
+		return false, err
+	}
+
+	used := map[string]bool{}
+	for _, file := range files {
+		parts := make([]string, len(file.Collection.Parts))
+		for i, p := range file.Collection.Parts {
+			parts[i] = safeName(p)
+		}
+		rel := filepath.Join(parts...) + ".md"
+		if used[rel] { // two sibling collections with the same name
+			rel = strings.TrimSuffix(rel, ".md") + fmt.Sprintf(" (#%d).md", file.Collection.ID)
+		}
+		used[rel] = true
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, rel)), 0o755); err != nil {
+			return false, err
+		}
+		md := file.Markdown
+		if err := writeFile(filepath.Join(dir, rel), func(w io.Writer) error { _, err := io.WriteString(w, md); return err }); err != nil {
+			return false, err
+		}
+		idx.content = append(idx.content, indexRow{
+			file: filepath.ToSlash(filepath.Join("content", rel)),
+			what: fmt.Sprintf("%s: %s, %s", file.Collection.Path, plural(file.Dashboards, "dashboard"), plural(file.Cards, "question")),
+		})
+	}
+	if snippets != "" {
+		if err := writeFile(filepath.Join(dir, "_snippets.md"), func(w io.Writer) error { _, err := io.WriteString(w, snippets); return err }); err != nil {
+			return false, err
+		}
+		idx.content = append(idx.content, indexRow{file: "content/_snippets.md", what: "SQL snippets the exported questions use"})
+	}
+	fmt.Fprintf(out, "  %s\n", plural(len(files), "collection file"))
+	return false, nil
+}
+
+// ---------------------------------------------------------------- index
+
+type indexRow struct{ file, what string }
+
+type index struct{ schemas, content []indexRow }
+
+func (x *index) empty() bool { return len(x.schemas)+len(x.content) == 0 }
+
+func (x *index) markdown(host string, showHost bool) string {
+	var b strings.Builder
+	b.WriteString("# Metabase Export\n\n")
+	if showHost {
+		fmt.Fprintf(&b, "Source: %s\n\n", host)
+	}
+	fmt.Fprintf(&b, "Generated %s by metabase-omnibus. Definitions and structure only: no data values and no query results.\n\n",
+		time.Now().UTC().Format("2006-01-02 15:04 UTC"))
+	b.WriteString("Give an assistant only the files a question needs. Schema files describe tables and columns; content files hold questions, their SQL, and dashboards.\n\n")
+	section := func(title string, rows []indexRow) {
+		if len(rows) == 0 {
+			return
+		}
+		fmt.Fprintf(&b, "## %s\n\n| File | Holds |\n| --- | --- |\n", title)
+		for _, r := range rows {
+			fmt.Fprintf(&b, "| %s | %s |\n", strings.ReplaceAll(r.file, "|", `\|`), strings.ReplaceAll(r.what, "|", `\|`))
+		}
+		b.WriteString("\n")
+	}
+	section("Database Shape", x.schemas)
+	section("Questions and Dashboards", x.content)
+	return b.String()
+}
+
+// ---------------------------------------------------------------- helpers
+
+func writeFile(path string, write func(io.Writer) error) error {
+	f, err := os.Create(path)
+	if err != nil {
 		return err
 	}
-
-	fmt.Fprintln(out)
-	for _, d := range docs {
-		fmt.Fprintf(out, "  %s: %s, %s\n", d.Metadata.Database,
-			plural(len(d.Metadata.Schemas), "schema"), plural(len(d.Tables), "table"))
+	if err := write(f); err != nil {
+		f.Close()
+		return err
 	}
-	if path != "-" {
-		fmt.Fprintln(out, ui.Good("Wrote "+path))
-	}
-	return nil
+	return f.Close()
 }
 
-// writeJSON writes one database as a single sql-x-ray document, or several as an array.
-func writeJSON(path string, docs []schema.Doc) error {
-	var w io.Writer = os.Stdout
-	if path != "-" {
-		f, err := os.Create(path)
-		if err != nil {
-			return err
+// safeName turns a name into a folder or file name that works on Windows,
+// macOS, and Linux.
+func safeName(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 32 || strings.ContainsRune(`<>:"/\|?*`, r) {
+			return '_'
 		}
-		defer f.Close()
-		w = f
+		return r
+	}, s)
+	s = strings.Trim(s, " .")
+	if s == "" {
+		return "_"
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	if len(docs) == 1 {
-		return enc.Encode(docs[0])
-	}
-	return enc.Encode(docs)
+	return s
 }
 
-// defaultOut puts the export in the Downloads folder, or the current folder
-// when there is none.
+// defaultOut puts the export folder in Downloads, or the current folder when
+// there is none.
 func defaultOut(host string) string {
-	name := "metabase-schema-" + strings.NewReplacer(":", "-", "/", "-").Replace(host) + ".json"
+	name := "metabase-omnibus-" + safeName(host)
 	if home, err := os.UserHomeDir(); err == nil {
 		dl := filepath.Join(home, "Downloads")
 		if info, err := os.Stat(dl); err == nil && info.IsDir() {
@@ -285,12 +475,13 @@ func matchDatabases(dbs []schema.Database, list string) ([]schema.Database, erro
 	return out, nil
 }
 
-func pickDBs(dbs []schema.Database, idx []int) []schema.Database {
-	out := make([]schema.Database, len(idx))
-	for i, j := range idx {
-		out[i] = dbs[j]
+func matchAny(list, s string) bool {
+	for _, p := range splitList(list) {
+		if ui.MatchName(p, s) {
+			return true
+		}
 	}
-	return out
+	return false
 }
 
 func splitList(s string) []string {

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"sort"
 	"strconv"
@@ -122,6 +123,22 @@ func (m *Metadata) Schemas() []SchemaCount {
 	return out
 }
 
+// FieldNames maps every Metabase field ID in the database to schema.table.column,
+// so the content export can name the column a filter points at.
+func (m *Metadata) FieldNames() map[int]string {
+	out := map[int]string{}
+	for _, t := range m.tables {
+		prefix := t.Name
+		if t.Schema != "" {
+			prefix = t.Schema + "." + t.Name
+		}
+		for _, f := range t.Fields {
+			out[f.ID] = prefix + "." + f.Name
+		}
+	}
+	return out
+}
+
 // SchemaCount is a schema and how many tables it holds.
 type SchemaCount struct {
 	Name   string
@@ -130,7 +147,12 @@ type SchemaCount struct {
 
 // ---------------------------------------------------------------- export, in sql-x-ray's layout
 
-// Doc is one database's dump.
+// Each schema becomes its own document, so a reader loads only the schema it
+// needs. The layout follows sql-x-ray, trimmed for tokens: the schema is named
+// once in metadata instead of on every table, columns are listed in database
+// order instead of carrying a position, and empty keys are left out.
+
+// Doc is one schema's dump.
 type Doc struct {
 	Metadata DocMetadata `json:"metadata"`
 	Tables   []Table     `json:"tables"`
@@ -139,24 +161,23 @@ type Doc struct {
 type DocMetadata struct {
 	ToolName     string         `json:"tool_name"`
 	Source       string         `json:"source"`
-	Instance     string         `json:"instance"`
+	Instance     string         `json:"instance,omitempty"`
 	Engine       string         `json:"engine"`
 	Database     string         `json:"database"`
+	Schema       string         `json:"schema"`
 	GeneratedAt  string         `json:"generated_at"`
-	Schemas      []string       `json:"schemas"`
 	ObjectCounts map[string]int `json:"object_counts"`
 	PrivacyNote  string         `json:"privacy_note"`
 	Limitations  string         `json:"limitations"`
 }
 
 type Table struct {
-	Schema           string       `json:"schema"`
 	Name             string       `json:"name"`
 	RowCountEstimate *int64       `json:"row_count_estimate,omitempty"`
 	Hidden           bool         `json:"hidden_in_metabase,omitempty"`
 	Description      string       `json:"description,omitempty"`
-	PrimaryKey       *PrimaryKey  `json:"primary_key"`
-	ForeignKeys      []ForeignKey `json:"foreign_keys"`
+	PrimaryKey       *PrimaryKey  `json:"primary_key,omitempty"`
+	ForeignKeys      []ForeignKey `json:"foreign_keys,omitempty"`
 	Columns          []Column     `json:"columns"`
 }
 
@@ -173,7 +194,6 @@ type ForeignKey struct {
 
 type Column struct {
 	Name        string `json:"name"`
-	Position    int    `json:"position"`
 	DataType    string `json:"data_type"`
 	Hidden      bool   `json:"hidden_in_metabase,omitempty"`
 	Description string `json:"description,omitempty"`
@@ -181,19 +201,19 @@ type Column struct {
 
 // Options controls what goes into a dump beyond the structure.
 type Options struct {
-	Instance            string
-	IncludeDescriptions bool // free text an admin typed; could say anything
-	RowCounts           bool // aggregate, but a small count can identify a small group
+	Instance            string // the Metabase host; empty leaves it out
+	IncludeDescriptions bool   // free text an admin typed; could say anything
+	RowCounts           bool   // aggregate, but a small count can identify a small group
 }
 
 const privacyNote = "This document contains only structural metadata: schema, table, and column names, column types, and key relationships. " +
 	"It contains no data values, value statistics, sample rows, or connection details."
 
 const limitations = "Built from the metadata Metabase stores, not from the database catalog. " +
-	"Views appear as tables, and indexes, nullability, routines, and multi-column keys are not available."
+	"Columns are listed in database order. Views appear as tables, and indexes, nullability, routines, and multi-column keys are not available."
 
-// Build turns one database's metadata into a dump, keeping only the named schemas.
-func Build(m *Metadata, keep map[string]bool, opt Options) Doc {
+// Build turns one schema of a database's metadata into a dump.
+func Build(m *Metadata, schemaName string, opt Options) Doc {
 	type ref struct{ schema, table, column string }
 	byID := map[int]ref{}
 	for _, t := range m.tables {
@@ -208,6 +228,7 @@ func Build(m *Metadata, keep map[string]bool, opt Options) Doc {
 		Instance:    opt.Instance,
 		Engine:      m.DB.Engine,
 		Database:    m.DB.Name,
+		Schema:      schemaName,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		PrivacyNote: privacyNote,
 		Limitations: limitations,
@@ -216,17 +237,13 @@ func Build(m *Metadata, keep map[string]bool, opt Options) Doc {
 		doc.Metadata.PrivacyNote += " Table and column descriptions written in Metabase are included and were not reviewed."
 	}
 
-	seen := map[string]bool{}
 	for _, t := range m.tables {
-		if !keep[t.Schema] {
+		if t.Schema != schemaName {
 			continue
 		}
-		seen[t.Schema] = true
 		tbl := Table{
-			Schema:      t.Schema,
-			Name:        t.Name,
-			Hidden:      t.VisibilityType != nil && *t.VisibilityType != "",
-			ForeignKeys: []ForeignKey{},
+			Name:   t.Name,
+			Hidden: t.VisibilityType != nil && *t.VisibilityType != "",
 		}
 		if opt.RowCounts {
 			tbl.RowCountEstimate = t.EstimatedRowCount
@@ -238,10 +255,9 @@ func Build(m *Metadata, keep map[string]bool, opt Options) Doc {
 		fields := append([]apiField(nil), t.Fields...)
 		sort.SliceStable(fields, func(i, j int) bool { return fields[i].DatabasePosition < fields[j].DatabasePosition })
 		var pk []string
-		for i, f := range fields {
+		for _, f := range fields {
 			col := Column{
 				Name:     f.Name,
-				Position: i + 1, // ordinal in database order, counted from 1 as sql-x-ray does
 				DataType: f.DatabaseType,
 				Hidden:   f.VisibilityType != "" && f.VisibilityType != "normal" && f.VisibilityType != "details-only",
 			}
@@ -270,18 +286,47 @@ func Build(m *Metadata, keep map[string]bool, opt Options) Doc {
 		doc.Tables = append(doc.Tables, tbl)
 	}
 
-	sort.Slice(doc.Tables, func(i, j int) bool {
-		if doc.Tables[i].Schema != doc.Tables[j].Schema {
-			return doc.Tables[i].Schema < doc.Tables[j].Schema
-		}
-		return doc.Tables[i].Name < doc.Tables[j].Name
-	})
-	for s := range seen {
-		doc.Metadata.Schemas = append(doc.Metadata.Schemas, s)
-	}
-	sort.Strings(doc.Metadata.Schemas)
+	sort.Slice(doc.Tables, func(i, j int) bool { return doc.Tables[i].Name < doc.Tables[j].Name })
 	doc.Metadata.ObjectCounts = map[string]int{"tables": len(doc.Tables)}
 	return doc
+}
+
+// WriteDoc writes a dump as compact JSON with one table per line: no
+// indentation to pay tokens for, but still readable and diffable by line.
+func WriteDoc(w io.Writer, d Doc) error {
+	meta, err := marshal(d.Metadata)
+	if err != nil {
+		return err
+	}
+	var b bytes.Buffer
+	b.WriteString(`{"metadata":`)
+	b.Write(meta)
+	b.WriteString(",\n\"tables\":[")
+	for i, t := range d.Tables {
+		line, err := marshal(t)
+		if err != nil {
+			return err
+		}
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString("\n")
+		b.Write(line)
+	}
+	b.WriteString("\n]}\n")
+	_, err = w.Write(b.Bytes())
+	return err
+}
+
+// marshal is json.Marshal without HTML escaping, so < and > stay readable.
+func marshal(v any) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(b.Bytes(), "\n"), nil
 }
 
 // decodeList accepts a bare JSON array or Metabase's {"data": [...]} wrapper.

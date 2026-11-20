@@ -1,0 +1,83 @@
+name: Go
+
+on:
+  # Run on pushes to main that touch the code or the module
+  push:
+    branches: [main]
+    paths:
+      - "**.go"
+      - "go.mod"
+      - ".github/workflows/go.yml"
+
+  # Run on pull requests that touch the code or the module
+  pull_request:
+    paths:
+      - "**.go"
+      - "go.mod"
+      - ".github/workflows/go.yml"
+
+  # Allow manual runs from the Actions tab
+  workflow_dispatch:
+
+# The jobs only check out, test, and build, so the token needs nothing
+# beyond reading the repository.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # The picker drives the terminal differently on Windows (console API) and
+    # on macOS and Linux (stty), so each platform has to build and pass.
+    strategy:
+      # One broken combination should not cancel the jobs that would have told
+      # us something.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # 1.22 is the floor go.mod declares; stable is what people run.
+        go: ["1.22", "stable"]
+        exclude:
+          # Go 1.22's linker writes Mach-O binaries with no LC_UUID load
+          # command, and the current macOS runner's dyld refuses to load one
+          # under -race. The floor is still checked on Linux and Windows.
+          - os: macos-latest
+            go: "1.22"
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          # No cache key to build from: this module has no dependencies, so
+          # there is no go.sum and nothing worth caching.
+          cache: false
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would change:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # The race detector needs a C toolchain, which the Windows runner does
+      # not set up for Go, so Windows runs the same tests without it.
+      - name: Test
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            go test ./...
+          else
+            go test -race ./...
+          fi
+
+      - name: Build
+        run: go build .

@@ -11,5 +11,9 @@
 !.env.example
 
 # Exports: they describe a real Metabase instance and never belong in the repo
-metabase-schema-*.json
+metabase-omnibus-*/
 /exports/
+
+# Go test and build output
+*.test
+*.out

@@ -117,6 +117,12 @@ func (c *Client) Get(ctx context.Context, path string, query url.Values, out any
 	return c.do(ctx, http.MethodGet, path, query, nil, out)
 }
 
+// Post sends body as JSON and decodes the JSON response into out. The tool
+// only posts to endpoints that read, such as compiling a question to SQL.
+func (c *Client) Post(ctx context.Context, path string, body, out any) error {
+	return c.do(ctx, http.MethodPost, path, nil, body, out)
+}
+
 // Close ends a username/password session. API keys need no cleanup.
 func (c *Client) Close(ctx context.Context) {
 	if c.session != "" {
