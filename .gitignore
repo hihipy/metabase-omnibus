@@ -1,0 +1,15 @@
+# Repo-specific rules. The managed block from sync-gitignores.zsh goes above this line.
+
+# Built binaries
+/metabase-omnibus
+/metabase-omnibus.exe
+/dist/
+
+# Credentials
+.env
+.env.*
+!.env.example
+
+# Exports: they describe a real Metabase instance and never belong in the repo
+metabase-schema-*.json
+/exports/
