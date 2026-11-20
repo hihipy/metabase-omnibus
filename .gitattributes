@@ -1,0 +1,4 @@
+# Go source stays LF on every platform. Windows checkouts otherwise get CRLF,
+# which gofmt reports as unformatted and fails the CI formatting check.
+*.go text eol=lf
+go.mod text eol=lf
