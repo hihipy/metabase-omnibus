@@ -135,6 +135,8 @@ func (s *Server) handle(t *testing.T, w http.ResponseWriter, r *http.Request) {
 			raw(w, card11)
 		case "/api/card/12":
 			raw(w, card12)
+		case "/api/card/14":
+			raw(w, card14)
 		default:
 			http.NotFound(w, r)
 		}
@@ -191,9 +193,10 @@ const collections = `[
 ]`
 
 const cardList = `[
- {"id":10,"name":"Orders by state","type":"question","collection_id":6,"archived":false,"creator":{"common_name":"CANARY_CREATOR"}},
- {"id":11,"name":"Order base","type":"model","collection_id":5,"archived":false},
- {"id":12,"name":"CANARY_PERSONAL draft","type":"question","collection_id":10,"archived":false},
+ {"id":10,"name":"Orders by state","type":"question","collection_id":6,"database_id":1,"archived":false,"creator":{"common_name":"CANARY_CREATOR"}},
+ {"id":11,"name":"Order base","type":"model","collection_id":5,"database_id":1,"archived":false},
+ {"id":14,"name":"Other database question","type":"question","collection_id":5,"database_id":2,"archived":false},
+ {"id":12,"name":"CANARY_PERSONAL draft","type":"question","collection_id":10,"database_id":1,"archived":false},
  {"id":13,"name":"Archived question","type":"question","collection_id":5,"archived":true}
 ]`
 
@@ -218,6 +221,11 @@ const card11 = `{"id":11,"name":"Order base","type":"model","display":"table","c
 
 const card12 = `{"id":12,"name":"CANARY_PERSONAL draft","type":"question","display":"table","collection_id":10,"database_id":1,
  "dataset_query":{"type":"native","database":1,"native":{"query":"SELECT 'CANARY_PERSONAL'"}}}`
+
+// card14 queries a database other than the sample, so choosing only the
+// sample database must leave it out.
+const card14 = `{"id":14,"name":"Other database question","type":"question","display":"table","collection_id":5,"database_id":2,
+ "dataset_query":{"type":"native","database":2,"native":{"query":"SELECT 1"}}}`
 
 const dashboardList = `[
  {"id":3,"name":"Sales overview","collection_id":5,"archived":false},

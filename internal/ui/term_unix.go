@@ -3,46 +3,14 @@
 package ui
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 )
 
-// On macOS and Linux, raw mode goes through stty against /dev/tty, which keeps
-// the tool free of a terminal package.
-
-type rawTerm struct {
-	tty   *os.File
-	saved string
-}
-
-func openRaw() (*rawTerm, error) {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		return nil, errors.New("no /dev/tty")
-	}
-	saved, err := stty(tty, "-g")
-	if err != nil {
-		tty.Close()
-		return nil, errors.New("stty -g: " + err.Error())
-	}
-	if _, err := stty(tty, "raw", "-echo"); err != nil {
-		tty.Close()
-		return nil, errors.New("stty raw: " + err.Error())
-	}
-	return &rawTerm{tty: tty, saved: saved}, nil
-}
-
-func (t *rawTerm) Read(b []byte) (int, error) { return t.tty.Read(b) }
-
-func (t *rawTerm) Restore() {
-	stty(t.tty, t.saved)
-	t.tty.Close()
-}
-
-func (t *rawTerm) Size() (rows, cols int) { return ttySize(t.tty) }
+// On macOS and Linux, the window size comes from stty against /dev/tty,
+// which keeps the typed picker free of a terminal package.
 
 // termSize reports the window size without entering raw mode.
 func termSize() (rows, cols int) {

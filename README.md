@@ -75,11 +75,11 @@ You now have a file called `metabase-omnibus` (`metabase-omnibus.exe` on Windows
 
 The tool needs two things from you: your Metabase's address, and a way to sign in.
 
-**An API key is best.** A Metabase admin creates one in Metabase's admin settings, under API keys. The key belongs to a group and gets exactly that group's access, so pick a group that can see what you want to export and nothing more. A group meant for analysts is usually right. Avoid the Administrators group: an admin key can change settings and permissions, and this tool only needs to read.
+**An API key is best.** A Metabase admin creates one in Metabase's admin settings, under API keys. Metabase's guide to [API keys](https://www.metabase.com/docs/latest/people-and-groups/api-keys) walks through it. The key belongs to a group and gets exactly that group's access, so pick a group that can see what you want to export and nothing more. A group meant for analysts is usually right. Avoid the Administrators group: an admin key can change settings and permissions, and this tool only needs to read.
 
 **Your Metabase username and password also work**, unless your organization signs in through single sign-on, in which case you need a key.
 
-Treat the key like a password. Keep it in a password manager, and do not put it in a shared folder or anything you commit.
+Treat the key like a password. Keep it in a password manager, and do not put it in a shared folder or anything you commit. Admins can see what each key has been used for on Metabase's [API key usage](https://www.metabase.com/docs/latest/monitor/api-key-usage) page, which is one more reason to give every person their own key.
 
 The tool only reads the sign-in from your environment, never from what you type after the command, so it never lands in your command history.
 
@@ -103,15 +103,15 @@ $env:METABASE_API_KEY = "paste-your-key-here"
 .\metabase-omnibus.exe
 ```
 
-It asks which databases, which schemas, and which collections to include, then writes a folder called `metabase-omnibus-metabase.example.com` into your **Downloads** folder. Open `index.md` in that folder first: it lists every file and what it holds.
+It asks one question, which databases to include, then writes a folder named for your Metabase and the time, such as `metabase-example-20261120-1925`, into your **Downloads** folder. Every run gets its own folder, so an old export is never mixed into a new one. Everything about each database you pick comes along: the shape of its tables, and every question and dashboard built on it. Every folder in it has an `index.md` listing what the folder holds and roughly how much of an AI assistant's reading capacity each file uses. Start with the one at the top.
 
 Those two `export` or `$env:` lines last until you close the window, so later runs in the same window need only the last line.
 
 To export only one part:
 
 ```bash
-./metabase-omnibus schema     # only the shape of the databases
-./metabase-omnibus content    # only questions, models, metrics, and dashboards
+./metabase-omnibus schema     # only the shape of each database
+./metabase-omnibus content    # only the questions and dashboards built on each one
 ```
 
 To save it somewhere else, name the folder:
@@ -124,33 +124,25 @@ To save it somewhere else, name the folder:
 
 ## Picking what to include
 
-Choosing is the default, because a large Metabase can hold hundreds of schemas and collections, and you rarely need all of them:
+The one question is which databases. Most people use Metabase with one database per project, team, or study, so that choice decides everything else: each database's schemas come along, and so does every collection holding questions that query it. Collections built on databases you did not pick are left out.
 
-```
-> [x] Our analytics                    2 dashboards, 14 questions
-  [x] Our analytics > Finance          1 dashboard, 6 questions
-  [ ] Our analytics > Archive          0 dashboards, 212 questions
-  [x] Our analytics > Finance > Board  3 dashboards, 9 questions
-
-  3 of 4 collections selected
-  up and down to move, space to toggle, a all, n none, enter to confirm, q to cancel
-```
-
-Everything starts ticked. Move with the arrow keys, press **space** to untick something, press **enter** when you are happy. Press **q** to skip that part of the export. A list with only one entry is chosen for you.
+Every database starts selected, marked `[x]`. Move with the arrow keys and press **x** to deselect one, or **ctrl+a** to select all again. With a long list, type **/** and part of a name to narrow it, for example `PROD`. Press **enter** to confirm, or **ctrl+c** to cancel. The keys are always listed at the bottom of the screen. If there is only one database, it is chosen for you.
 
 If you already know what you want, name it and skip the question. Patterns work, with `*` standing for anything:
+
+```bash
+./metabase-omnibus -database "*PROD*"
+```
+
+That takes every database with PROD in its name, which is the quick way to leave out test copies.
+
+To narrow further inside the databases you pick, name schemas or collections the same way:
 
 ```bash
 ./metabase-omnibus -database "Sales DB" -schema "reporting" -collection "*Finance*"
 ```
 
-To take everything without being asked, add `-all`:
-
-```bash
-./metabase-omnibus -all
-```
-
-If the arrow keys misbehave in your terminal, add `-plain` to type your choices instead: numbers (`1,4,7-9`), names, or patterns (`sales*`). Put a minus on every entry to leave those out instead (`-*_test`).
+To take everything without being asked, add `-all`. If the list does not draw properly in your terminal, add `-plain` to type your choice instead: numbers (`1,4,7-9`), names, or patterns (`sales*`). Put a minus on every entry to leave those out instead (`-*_test`).
 
 ---
 
@@ -201,21 +193,33 @@ These files describe the structure of a Metabase and the databases behind it: sc
 
 ## What the finished folder looks like
 
+One folder per database, and inside it one folder per collection, mirroring how your Metabase is organized. Every question and dashboard is its own file, and every folder has an index:
+
 ```
-metabase-omnibus-metabase.example.com/
-├── index.md                       every file below, and what it holds
-├── schema/
-│   └── Sales DB/
-│       ├── public.json            one file per schema
-│       └── reporting.json
-└── content/
-    ├── Our analytics.md           one file per collection
-    ├── Our analytics/
-    │   ├── Finance.md
-    │   └── Finance/
-    │       └── Board.md
-    └── _snippets.md               SQL snippets the questions use
+metabase-example-20261120-1925/
+├── index.md                            every database, with counts and token totals
+├── Sales DB/
+│   ├── index.md                        its schemas, its collections, and every question in a table
+│   ├── schema/
+│   │   ├── public.json                 one file per schema
+│   │   └── reporting.json
+│   └── questions/
+│       ├── index.md                    what sits at the top level, and the collections below
+│       ├── Finance/
+│       │   ├── index.md                what this collection holds
+│       │   ├── D3 Sales overview.md    one file per dashboard
+│       │   ├── Q42 Revenue by region.md
+│       │   └── Board/
+│       │       ├── index.md
+│       │       └── Q57 Quarterly targets.md
+│       └── _snippets.md                SQL snippets these questions use
+└── Marketing DB/
+    └── ...
 ```
+
+A database's `index.md` lists every question and dashboard in one table: its ID, name, type, collection, the dashboards that show it, whether its SQL was written by hand or translated from the visual editor, when it last changed, and its size in tokens. Each name links to its file.
+
+That makes the indexes the place to start with an assistant. Give it a database's `index.md` and it can tell you which questions to read next. To ask about one report, give it that report's file and the schema files it reads.
 
 A schema file is compact JSON, one table per line:
 
@@ -226,12 +230,14 @@ A schema file is compact JSON, one table per line:
 ]}
 ```
 
-A collection file is Markdown, with each dashboard and question under its own heading:
+A question file is Markdown:
 
 ````markdown
-## [Q42] Revenue by region
+# [Q42] Revenue by region
 
-question, display bar, database Sales DB, updated 2026-11-10
+_Definition only, no query results. SQL is shown as written, so a literal typed into a query is included._
+
+question in Our analytics > Finance, display bar, database Sales DB, updated 2026-11-10
 Built on: [17] Order base
 On dashboards: [D3] Sales overview
 Variables: {{region}} string/=, filters column public.customers.region
@@ -250,12 +256,12 @@ Columns: region Text, sum Decimal
 | Option | What it does |
 |---|---|
 | `-url URL` | Your Metabase's address, instead of setting `METABASE_URL` |
-| `-out PATH` | Where to put the export folder; defaults to `~/Downloads` |
+| `-out PATH` | The export folder to write; defaults to a new, timestamped folder in `~/Downloads` |
 | `-database LIST` | Use these databases, by name, number, or pattern, without asking |
-| `-schema LIST` | Use the schemas that match, without asking |
-| `-collection LIST` | Use the collections whose path matches, without asking |
-| `-all` | Take everything without asking, which is also what happens with no terminal |
-| `-plain` | Type a selection instead of using arrow keys |
+| `-schema LIST` | Within the chosen databases, keep only the schemas that match |
+| `-collection LIST` | Within the chosen databases, keep only the collections whose path matches |
+| `-all` | Take every database without asking, which is also what happens with no terminal |
+| `-plain` | Type your choice instead of using the interactive list |
 | `-include-descriptions` | Keep descriptions and dashboard text cards |
 | `-include-personal` | Keep people's personal collections |
 | `-include-hidden` | Keep tables and columns an admin hid in Metabase |
@@ -269,6 +275,36 @@ Columns: region Text, sum Decimal
 Running `./metabase-omnibus -help` prints all of this in the terminal.
 
 Headings and warnings are colour-highlighted when you run it in a terminal. Setting `NO_COLOR` turns the highlighting off.
+
+---
+
+## How it talks to Metabase
+
+Everything goes through Metabase's own API, the same one its web pages use. These are the only calls the tool makes, and every one of them reads:
+
+| Call | What it returns | What the tool keeps |
+| --- | --- | --- |
+| `GET /api/database` | Every database your sign-in can see | Name, engine, and number. Never the connection details |
+| `GET /api/database/:id/metadata` | Every table and column Metabase knows about | Names, types, and keys. Never the statistics Metabase gathered from your data |
+| `GET /api/collection` | Every collection, with where it sits in the tree | Names and paths, minus personal collections |
+| `GET /api/card` and `GET /api/card/:id` | Questions, models, and metrics | Definitions and SQL. Never results, filter defaults, or who made them |
+| `POST /api/dataset/native` | The SQL behind a visual-editor question | The SQL. Metabase translates the question without running it |
+| `GET /api/dashboard/` and `GET /api/dashboard/:id` | Dashboards and their cards | Layout, filters, and wiring |
+| `GET /api/native-query-snippet` | Shared SQL snippets | Only the snippets the exported questions use |
+| `POST` and `DELETE /api/session` | A sign-in session | Only when you sign in with a password instead of a key |
+
+To look at any of these yourself, `curl` with your key works:
+
+```bash
+curl -H "x-api-key: $METABASE_API_KEY" "$METABASE_URL/api/database"
+curl -H "x-api-key: $METABASE_API_KEY" "$METABASE_URL/api/card/42?legacy-mbql=true"
+```
+
+The `legacy-mbql=true` on the second line asks newer versions of Metabase for questions in the older, documented shape, which is what this tool reads.
+
+The full reference is Metabase's [API documentation](https://www.metabase.com/docs/latest/api). Metabase also has a gentler [introduction to its API](https://www.metabase.com/learn/administration/metabase-api). The API is not versioned, so a Metabase upgrade can change it. If this tool breaks after an upgrade, that is the first place to look.
+
+Metabase's paid plans include [serialization](https://www.metabase.com/docs/latest/installation-and-operation/serialization), which exports the same content as YAML for moving it between servers. This tool covers the reading side on any plan.
 
 ---
 
@@ -286,18 +322,16 @@ Headings and warnings are colour-highlighted when you run it in a terminal. Sett
 
 ## For developers
 
-Written in Go with no dependencies outside the standard library.
+Written in Go. The interactive list is Charm's [huh](https://github.com/charmbracelet/huh), styled with [Lip Gloss](https://github.com/charmbracelet/lipgloss); everything else is the standard library. Dependencies are pinned by version and checksum in `go.sum`.
 
 ```
 metabase-omnibus/
-├── main.go                  commands, flags, the three pickers, writing the folder
+├── main.go                  commands, flags, the database picker, writing one folder per database
 └── internal/
     ├── metabase/client.go   API client: sign-in, certificates, refuses redirects and plain http
     ├── schema/schema.go     database shape, in sql-x-ray's layout
     ├── content/content.go   collections, questions, dashboards, snippets
-    ├── ui/                  picker, colour, progress bar
-    │   ├── term_unix.go     raw terminal through stty
-    │   └── term_windows.go  raw terminal through the Windows console
+    ├── ui/                  the huh list, the typed fallback, colour, progress bar
     └── fakemb/fakemb.go     a fake Metabase for the tests
 ```
 

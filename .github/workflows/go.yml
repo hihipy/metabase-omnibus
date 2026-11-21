@@ -7,6 +7,8 @@ on:
     paths:
       - "**.go"
       - "go.mod"
+      - "go.sum"
+      - ".gitattributes"
       - ".github/workflows/go.yml"
 
   # Run on pull requests that touch the code or the module
@@ -14,6 +16,8 @@ on:
     paths:
       - "**.go"
       - "go.mod"
+      - "go.sum"
+      - ".gitattributes"
       - ".github/workflows/go.yml"
 
   # Allow manual runs from the Actions tab
@@ -34,14 +38,15 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        # 1.22 is the floor go.mod declares; stable is what people run.
-        go: ["1.22", "stable"]
+        # "go.mod" is the floor the module declares, read from the file so the
+        # check follows it when a dependency raises it; stable is what people run.
+        go: ["go.mod", "stable"]
         exclude:
-          # Go 1.22's linker writes Mach-O binaries with no LC_UUID load
-          # command, and the current macOS runner's dyld refuses to load one
-          # under -race. The floor is still checked on Linux and Windows.
+          # Older Go linkers write Mach-O binaries the current macOS runner's
+          # dyld refuses under -race. The floor is still checked on Linux and
+          # Windows, and macOS on the toolchain people actually have.
           - os: macos-latest
-            go: "1.22"
+            go: "go.mod"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -52,10 +57,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go }}
-          # No cache key to build from: this module has no dependencies, so
-          # there is no go.sum and nothing worth caching.
-          cache: false
+          go-version-file: ${{ matrix.go == 'go.mod' && 'go.mod' || '' }}
+          go-version: ${{ matrix.go != 'go.mod' && matrix.go || '' }}
+          # Dependencies are pinned in go.sum, which keys the module cache.
+          cache: true
 
       - name: Check formatting
         run: |

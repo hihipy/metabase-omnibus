@@ -21,26 +21,24 @@ type Item struct {
 // Pick asks which items to keep and returns their indexes in list order, or
 // nil if the user cancelled. noun names the items in prompts ("databases").
 //
-// It prefers the arrow-key picker and falls back to typing when the terminal
-// cannot be driven, or always types when plain is set. The typed prompt takes
-// an empty line for everything, or numbers, ranges, names, and globs. A minus
-// on every entry drops instead of takes.
+// It uses the interactive list in huh.go, and the typed prompt when plain is
+// set. The typed prompt takes an empty line for everything, or numbers,
+// ranges, names, and globs. A minus on every entry drops instead of takes.
 func Pick(items []Item, noun string, plain bool, out io.Writer) ([]int, error) {
 	if len(items) == 0 {
 		return nil, nil
 	}
-	if !plain {
-		if picked, ok, err := pickArrows(items, noun, out); ok {
-			if err != nil {
-				return nil, err
-			}
-			if picked != nil {
-				fmt.Fprintf(out, "selected %d of %d %s\n", len(picked), len(items), noun)
-			}
-			return picked, nil
-		}
+	if plain {
+		return pickTyped(items, noun, os.Stdin, out)
 	}
-	return pickTyped(items, noun, os.Stdin, out)
+	picked, err := pickList(items, noun)
+	if err != nil {
+		return nil, err
+	}
+	if picked != nil {
+		fmt.Fprintf(out, "selected %d of %d %s\n", len(picked), len(items), noun)
+	}
+	return picked, nil
 }
 
 func pickTyped(items []Item, noun string, in io.Reader, out io.Writer) ([]int, error) {

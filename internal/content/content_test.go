@@ -12,12 +12,16 @@ import (
 type run struct {
 	srv      *fakemb.Server
 	cat      *Catalog
-	files    []File
+	items    []Item
 	snippets string
 	all      string // every file and the snippets, joined, for scanning
 }
 
 func export(t *testing.T, opt Options, personal bool) run {
+	return exportFor(t, opt, personal, nil)
+}
+
+func exportFor(t *testing.T, opt Options, personal bool, dbs map[int]bool) run {
 	t.Helper()
 	srv := fakemb.New(t)
 	c, err := metabase.New(context.Background(), metabase.Config{URL: srv.URL, APIKey: fakemb.APIKey, AllowHTTP: true})
@@ -28,20 +32,23 @@ func export(t *testing.T, opt Options, personal bool) run {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if dbs != nil {
+		cat.Restrict(dbs)
+	}
 	keep := map[int]bool{}
 	for _, col := range cat.Collections {
 		keep[col.ID] = true
 	}
-	files, snippets, err := Export(context.Background(), c, cat, keep, opt)
+	items, snippets, err := Export(context.Background(), c, cat, keep, opt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var b strings.Builder
-	for _, f := range files {
-		b.WriteString(f.Markdown)
+	for _, it := range items {
+		b.WriteString(it.Markdown)
 	}
 	b.WriteString(snippets)
-	return run{srv, cat, files, snippets, b.String()}
+	return run{srv, cat, items, snippets, b.String()}
 }
 
 func TestCollectionsSkipPersonalAndArchived(t *testing.T) {
@@ -85,7 +92,7 @@ func TestOptInText(t *testing.T) {
 func TestNativeQuestion(t *testing.T) {
 	r := export(t, Options{FieldNames: map[int]string{202: "PUBLIC.PEOPLE.STATE"}, DBNames: map[int]string{1: "Sample Database"}}, false)
 	for _, s := range []string{
-		"## [Q10] Orders by state",
+		"# [Q10] Orders by state",
 		"database Sample Database",
 		"[[AND STATE = {{state}}]]",
 		"Built on: [11] Order base",
@@ -121,7 +128,7 @@ func TestNoCompile(t *testing.T) {
 func TestDashboard(t *testing.T) {
 	r := export(t, Options{}, false)
 	for _, s := range []string{
-		"## [D3] Sales overview",
+		"# [D3] Sales overview",
 		"Filters: State (string/=)",
 		`[10] Orders by state (shown as "Orders, by state") in Our analytics > Finance > Reports`,
 		"State to variable {{state}}",
@@ -148,5 +155,51 @@ func TestPersonalOptIn(t *testing.T) {
 	}
 	if !found {
 		t.Error("-include-personal did not include the personal collection")
+	}
+}
+
+func TestRestrictToDatabases(t *testing.T) {
+	all := export(t, Options{}, false)
+	if !strings.Contains(all.all, "Other database question") {
+		t.Fatal("with no database chosen, every question should be exported")
+	}
+	one := exportFor(t, Options{}, false, map[int]bool{1: true})
+	if strings.Contains(one.all, "Other database question") || one.srv.Saw("GET /api/card/14") {
+		t.Error("a question on an unchosen database was exported or fetched")
+	}
+	if !strings.Contains(one.all, "Orders by state") || !strings.Contains(one.all, "Sales overview") {
+		t.Error("questions and dashboards on the chosen database went missing")
+	}
+	none := exportFor(t, Options{}, false, map[int]bool{99: true})
+	if len(none.items) != 0 {
+		t.Errorf("no question uses database 99, but %d items were exported", len(none.items))
+	}
+}
+
+func TestItemDetails(t *testing.T) {
+	r := export(t, Options{}, false)
+	byLabel := map[string]Item{}
+	for _, it := range r.items {
+		byLabel[it.Label] = it
+		if !strings.HasPrefix(it.Markdown, "# ["+it.Label+"] ") {
+			t.Errorf("%s does not open with its own heading", it.Label)
+		}
+		if !strings.Contains(it.Markdown, "no query results") {
+			t.Errorf("%s does not say what it is", it.Label)
+		}
+	}
+	q, m, d := byLabel["Q10"], byLabel["M11"], byLabel["D3"]
+	if q.Kind != "question" || q.SQL != "native" || q.Display != "bar" || q.Updated != "2026-11-10" ||
+		q.Collection.Path != "Our analytics > Finance > Reports" || len(q.Dashboards) != 1 {
+		t.Errorf("Q10 = %+v", q)
+	}
+	if m.Kind != "model" || m.SQL != "compiled" {
+		t.Errorf("M11 = %+v", m)
+	}
+	if d.Kind != "dashboard" || d.Cards != 2 {
+		t.Errorf("D3 = %+v", d)
+	}
+	if r.items[0].Label != "D3" {
+		t.Errorf("dashboards should come first in their collection; first item is %s", r.items[0].Label)
 	}
 }

@@ -42,6 +42,7 @@ type apiListItem struct {
 	Name         string `json:"name"`
 	Model        string `json:"model"` // only in /api/search results
 	CollectionID *int   `json:"collection_id"`
+	DatabaseID   *int   `json:"database_id"`
 	Collection   *struct {
 		ID json.RawMessage `json:"id"`
 	} `json:"collection"` // /api/search nests it
@@ -161,6 +162,35 @@ type Catalog struct {
 	cards       []apiListItem
 	dashboards  []apiListItem
 	cardNames   map[int]string
+}
+
+// Restrict keeps only the questions that query the given databases, and the
+// dashboards in collections that still hold one, so choosing databases also
+// narrows the collections on offer.
+func (c *Catalog) Restrict(dbIDs map[int]bool) {
+	var cards []apiListItem
+	live := map[int]bool{}
+	for _, it := range c.cards {
+		if it.DatabaseID != nil && dbIDs[*it.DatabaseID] {
+			cards = append(cards, it)
+			live[colID(it)] = true
+		}
+	}
+	var dashes []apiListItem
+	for _, it := range c.dashboards {
+		if live[colID(it)] {
+			dashes = append(dashes, it)
+		}
+	}
+	c.cards, c.dashboards = cards, dashes
+}
+
+// ForDatabase returns a copy of the catalog holding only one database's
+// questions, and the dashboards in the collections that hold them.
+func (c *Catalog) ForDatabase(id int) *Catalog {
+	cp := *c
+	cp.Restrict(map[int]bool{id: true})
+	return &cp
 }
 
 // Counts reports how many cards and dashboards sit directly in a collection.
@@ -287,12 +317,20 @@ type Options struct {
 	Progress    func(done, total int, label string)
 }
 
-// File is one collection's export, ready to write.
-type File struct {
+// Item is one exported question, model, metric, or dashboard: its own file,
+// plus the details an index lists about it.
+type Item struct {
 	Collection Collection
+	Kind       string // question, model, metric, or dashboard
+	Label      string // Q42, M11, MT7, or D3
+	ID         int
+	Name       string
+	Display    string   // how a question is drawn: table, bar, line...
+	Updated    string   // YYYY-MM-DD
+	SQL        string   // native, compiled, unavailable, or empty for a dashboard
+	Dashboards []string // for a question: the dashboards showing it
+	Cards      int      // for a dashboard: how many cards it holds
 	Markdown   string
-	Cards      int
-	Dashboards int
 }
 
 type card struct {
@@ -308,9 +346,9 @@ type card struct {
 	dashboards []string
 }
 
-// Export fetches the chosen collections' cards and dashboards and renders one
-// Markdown file per collection, plus the SQL snippets those cards use.
-func Export(ctx context.Context, c *metabase.Client, cat *Catalog, keep map[int]bool, opt Options) ([]File, string, error) {
+// Export fetches the chosen collections' cards and dashboards and renders each
+// as its own Markdown item, plus the SQL snippets those cards use.
+func Export(ctx context.Context, c *metabase.Client, cat *Catalog, keep map[int]bool, opt Options) ([]Item, string, error) {
 	var dashIDs, cardIDs []int
 	for _, it := range cat.dashboards {
 		if keep[colID(it)] {
@@ -384,57 +422,58 @@ func Export(ctx context.Context, c *metabase.Client, cat *Catalog, keep map[int]
 		}
 	}
 
-	// Group into one file per collection.
-	byCol := map[int]*File{}
-	cardFile := map[int]string{}
+	cardPath := map[int]string{}
 	for _, cd := range cards {
-		cardFile[cd.ID] = cat.byID[intOr(cd.CollectionID)].Path
-	}
-	get := func(id int) *File {
-		if f, ok := byCol[id]; ok {
-			return f
-		}
-		f := &File{Collection: cat.byID[id]}
-		byCol[id] = f
-		return f
-	}
-	var bodies = map[int]*strings.Builder{}
-	body := func(id int) *strings.Builder {
-		if b, ok := bodies[id]; ok {
-			return b
-		}
-		b := &strings.Builder{}
-		bodies[id] = b
-		return b
-	}
-	sort.Slice(dashes, func(i, j int) bool { return dashes[i].Name < dashes[j].Name })
-	for _, d := range dashes {
-		id := intOr(d.CollectionID)
-		get(id).Dashboards++
-		renderDashboard(body(id), d, cat, cardFile, opt)
-	}
-	sort.Slice(cards, func(i, j int) bool { return cards[i].Name < cards[j].Name })
-	for _, cd := range cards {
-		id := intOr(cd.CollectionID)
-		get(id).Cards++
-		renderCard(body(id), cd, cat, opt)
+		cardPath[cd.ID] = cat.byID[intOr(cd.CollectionID)].Path
 	}
 
-	var files []File
-	for id, f := range byCol {
+	var items []Item
+	for _, d := range dashes {
 		var b strings.Builder
-		fmt.Fprintf(&b, "# %s\n\n", f.Collection.Path)
-		fmt.Fprintf(&b, "%s, %s. %s\n\n", plural(f.Dashboards, "dashboard"), plural(f.Cards, "question"), fileNote)
-		b.WriteString(bodies[id].String())
-		f.Markdown = b.String()
-		files = append(files, *f)
+		renderDashboard(&b, d, cat, cardPath, opt)
+		items = append(items, Item{
+			Collection: cat.byID[intOr(d.CollectionID)], Kind: "dashboard", Label: "D" + strconv.Itoa(d.ID),
+			ID: d.ID, Name: d.Name, Cards: len(d.Dashcards), Markdown: b.String(),
+		})
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Collection.Path < files[j].Collection.Path })
-	return files, snippetsMD, nil
+	for _, cd := range cards {
+		var b strings.Builder
+		renderCard(&b, cd, cat, opt)
+		it := Item{
+			Collection: cat.byID[intOr(cd.CollectionID)], Kind: cd.kind, Label: label(cd.kind, cd.ID),
+			ID: cd.ID, Name: cd.Name, Display: cd.Display, Dashboards: cd.dashboards, Markdown: b.String(),
+		}
+		if len(cd.UpdatedAt) >= 10 {
+			it.Updated = cd.UpdatedAt[:10]
+		}
+		switch {
+		case cd.sql != "" && cd.compiled:
+			it.SQL = "compiled"
+		case cd.sql != "":
+			it.SQL = "native"
+		default:
+			it.SQL = "unavailable"
+		}
+		items = append(items, it)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Collection.Path != items[j].Collection.Path {
+			return items[i].Collection.Path < items[j].Collection.Path
+		}
+		if (items[i].Kind == "dashboard") != (items[j].Kind == "dashboard") {
+			return items[i].Kind == "dashboard" // dashboards first in each collection
+		}
+		return items[i].Name < items[j].Name
+	})
+	return items, snippetsMD, nil
 }
 
-const fileNote = "Definitions only: no query results. SQL is shown as written, so any literal typed into a query is included. " +
+// FileNote explains the export; the indexes carry it in full.
+const FileNote = "Definitions only: no query results. SQL is shown as written, so any literal typed into a query is included. " +
 	"IDs: Q question, M model, MT metric, D dashboard. SQL uses Metabase syntax: {{variable}}, [[optional clause]], {{#id}} for a saved question."
+
+// itemNote travels in every item file, so a file read on its own still says what it is.
+const itemNote = "_Definition only, no query results. SQL is shown as written, so a literal typed into a query is included._"
 
 func kindOf(c apiCard) string {
 	switch {
@@ -543,8 +582,8 @@ func target(raw []byte, fields map[int]string) string {
 }
 
 func renderDashboard(b *strings.Builder, d apiDashboard, cat *Catalog, cardFile map[int]string, opt Options) {
-	fmt.Fprintf(b, "## [D%d] %s\n\n", d.ID, d.Name)
-	fmt.Fprintf(b, "Dashboard.")
+	fmt.Fprintf(b, "# [D%d] %s\n\n%s\n\n", d.ID, d.Name, itemNote)
+	fmt.Fprintf(b, "Dashboard in %s.", cat.byID[intOr(d.CollectionID)].Path)
 	if opt.IncludeText && d.Description != nil && *d.Description != "" {
 		fmt.Fprintf(b, " Description: %s", oneLine(*d.Description))
 	}
@@ -623,8 +662,8 @@ func renderDashboard(b *strings.Builder, d apiDashboard, cat *Catalog, cardFile 
 }
 
 func renderCard(b *strings.Builder, cd card, cat *Catalog, opt Options) {
-	fmt.Fprintf(b, "## [%s] %s\n\n", label(cd.kind, cd.ID), cd.Name)
-	meta := []string{cd.kind, "display " + cd.Display}
+	fmt.Fprintf(b, "# [%s] %s\n\n%s\n\n", label(cd.kind, cd.ID), cd.Name, itemNote)
+	meta := []string{cd.kind + " in " + cat.byID[intOr(cd.CollectionID)].Path, "display " + cd.Display}
 	if cd.DatabaseID != nil {
 		if name, ok := opt.DBNames[*cd.DatabaseID]; ok {
 			meta = append(meta, "database "+name)

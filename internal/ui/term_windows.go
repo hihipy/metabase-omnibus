@@ -3,16 +3,13 @@
 package ui
 
 import (
-	"errors"
 	"os"
 	"syscall"
 	"unsafe"
 )
 
-// On Windows, raw mode goes through the console API in kernel32, called
-// through the standard library's syscall package so the tool stays
-// dependency-free. Virtual-terminal input makes arrow keys arrive as the same
-// escape sequences macOS and Linux send, so one key decoder serves both.
+// On Windows, the window size and colour support come from the console API in
+// kernel32, called through the standard library's syscall package.
 
 var (
 	kernel32                       = syscall.NewLazyDLL("kernel32.dll")
@@ -21,10 +18,6 @@ var (
 )
 
 const (
-	enableProcessedInput  = 0x0001
-	enableLineInput       = 0x0002
-	enableEchoInput       = 0x0004
-	enableVTInput         = 0x0200
 	enableProcessedOutput = 0x0001
 	enableVTProcessing    = 0x0004
 )
@@ -46,42 +39,6 @@ func setConsoleMode(h syscall.Handle, mode uint32) error {
 	}
 	return nil
 }
-
-type rawTerm struct {
-	in, out         syscall.Handle
-	inMode, outMode uint32
-}
-
-func openRaw() (*rawTerm, error) {
-	t := &rawTerm{
-		in:  syscall.Handle(os.Stdin.Fd()),
-		out: syscall.Handle(os.Stderr.Fd()),
-	}
-	if err := syscall.GetConsoleMode(t.in, &t.inMode); err != nil {
-		return nil, errors.New("input is not a console")
-	}
-	if err := syscall.GetConsoleMode(t.out, &t.outMode); err != nil {
-		return nil, errors.New("output is not a console")
-	}
-	raw := t.inMode&^(enableEchoInput|enableLineInput|enableProcessedInput) | enableVTInput
-	if err := setConsoleMode(t.in, raw); err != nil {
-		return nil, errors.New("console does not support raw input: " + err.Error())
-	}
-	if err := setConsoleMode(t.out, t.outMode|enableProcessedOutput|enableVTProcessing); err != nil {
-		setConsoleMode(t.in, t.inMode)
-		return nil, errors.New("console does not support escape sequences: " + err.Error())
-	}
-	return t, nil
-}
-
-func (t *rawTerm) Read(b []byte) (int, error) { return os.Stdin.Read(b) }
-
-func (t *rawTerm) Restore() {
-	setConsoleMode(t.in, t.inMode)
-	setConsoleMode(t.out, t.outMode)
-}
-
-func (t *rawTerm) Size() (rows, cols int) { return termSize() }
 
 func termSize() (rows, cols int) {
 	var info screenBufferInfo
