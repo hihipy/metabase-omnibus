@@ -308,6 +308,33 @@ Metabase's paid plans include [serialization](https://www.metabase.com/docs/late
 
 ---
 
+## What else the Metabase API can do, and where it stops
+
+This tool uses a small, read-only corner of the API. The rest is worth knowing about, both for what you can build and for what this tool deliberately leaves alone.
+
+**What the API can do.** Metabase's [introduction to its API](https://www.metabase.com/learn/administration/metabase-api) covers:
+
+| Area | Examples |
+| --- | --- |
+| Setting up a Metabase | Create the first admin, change settings, set up email |
+| Databases | Add a database, check a connection, rescan its tables |
+| People and permissions | Create, update, and deactivate users; manage groups and who is in them |
+| Questions and dashboards | Create and edit questions; build dashboards and place questions on them |
+| Running queries | Run a saved question or a new query and get its rows back |
+| Everything else | Collections, search, sessions, and embedding |
+
+**Where it stops:**
+
+- **It changes without warning.** The API has no version numbers, so there is no way to pin to a stable one. Metabase says it rarely changes or removes endpoints, and it lists breaking changes in its [API changelog](https://www.metabase.com/docs/latest/developers-guide/api-changelog).
+- **A key can do what its group can do, nothing more.** Creating and listing keys needs an admin.
+- **Results are capped.** By default, a query run through the API returns at most 2,000 rows of raw data, or 10,000 rows when the query groups and summarizes. An admin running Metabase on their own server can raise both limits with [environment variables](https://www.metabase.com/docs/latest/configuring-metabase/environment-variables); on Metabase Cloud, Metabase support can change them.
+- **Rate limits are not documented.** Metabase's API guide does not say how many requests it allows. This tool sends one request at a time, which keeps the load on your Metabase to roughly what one person clicking through it would cause.
+- **Some endpoints are paid features.** Serialization is one. Metabase's [API reference](https://www.metabase.com/docs/latest/api) marks the others.
+
+**What this tool will not do with it**, by design: run a query, read a result, or change anything. Every call it makes is in the table in the section above. If you build on the API yourself, the same rule is a good default: give your key a group that can read only what the job needs.
+
+---
+
 ## Things it cannot do
 
 **It sees what Metabase knows, not what the database knows.** Views look like ordinary tables, and there are no indexes, stored procedures, or detail about which columns can be empty. If you need those, run [sql-x-ray](https://github.com/hihipy/sql-x-ray) against the database directly.
