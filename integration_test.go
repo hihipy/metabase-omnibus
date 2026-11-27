@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -261,14 +262,19 @@ func TestIntegration(t *testing.T) {
 		"index.md",
 		"Sample Database/index.md",
 		"Sample Database/catalog.csv",
-		"Sample Database/schema/PUBLIC/index.md",
-		"Sample Database/schema/PUBLIC/ORDERS.json",
-		"Sample Database/schema/PUBLIC/PRODUCTS.json",
 		"Sample Database/questions/index.md",
 		"Sample Database/questions/_snippets.md",
 	} {
 		if _, ok := files[want]; !ok {
 			t.Errorf("missing %s", want)
+		}
+	}
+
+	// Metabase reports the Sample Database's tables with no schema on some
+	// versions and PUBLIC on others, so look in whichever folder it used.
+	for _, table := range []string{"index.md", "ORDERS.json", "PRODUCTS.json"} {
+		if find(files, table, "Sample Database/schema/") == "" {
+			t.Errorf("missing Sample Database/schema/<schema>/%s", table)
 		}
 	}
 
@@ -281,13 +287,13 @@ func TestIntegration(t *testing.T) {
 		t.Logf("files written:\n%s", strings.Join(names, "\n"))
 	}
 
-	question := find(files, fmt.Sprintf("Q%d %s.md", card.ID, itQuestion))
+	question := find(files, fmt.Sprintf("Q%d %s.md", card.ID, itQuestion), "Sample Database/questions/")
 	if question == "" {
 		t.Errorf("no file for question %d", card.ID)
 	} else if !strings.Contains(files[question], itSQL) {
 		t.Errorf("%s does not carry the SQL:\n%s", question, files[question])
 	}
-	dashboard := find(files, fmt.Sprintf("D%d %s.md", dash.ID, itDash))
+	dashboard := find(files, fmt.Sprintf("D%d %s.md", dash.ID, itDash), "Sample Database/questions/")
 	if dashboard == "" {
 		t.Errorf("no file for dashboard %d", dash.ID)
 	} else if !strings.Contains(files[dashboard], itQuestion) {
@@ -315,10 +321,11 @@ func TestIntegration(t *testing.T) {
 	}
 }
 
-// find returns the exported path that ends in name, in any collection folder.
-func find(files map[string]string, name string) string {
+// find returns the exported path under prefix whose last part is name, in
+// any folder below it.
+func find(files map[string]string, name, prefix string) string {
 	for p := range files {
-		if p == name || strings.HasSuffix(p, "/"+name) {
+		if strings.HasPrefix(p, prefix) && path.Base(p) == name {
 			return p
 		}
 	}
