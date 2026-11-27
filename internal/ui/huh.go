@@ -17,7 +17,7 @@ func pickList(items []Item, noun string) ([]int, error) {
 		if it.Count != "" {
 			label += "  (" + it.Count + ")"
 		}
-		opts[i] = huh.NewOption(label, i).Selected(true)
+		opts[i] = huh.NewOption(label, i)
 	}
 
 	rows, _ := termSize()
@@ -29,11 +29,18 @@ func pickList(items []Item, noun string) ([]int, error) {
 	var picked []int
 	list := huh.NewMultiSelect[int]().
 		Title("Which " + noun + "?").
-		Description("Everything starts selected. The keys are listed at the bottom.").
+		Description("Nothing is selected yet. The keys are listed at the bottom.").
 		Options(opts...).
 		Filterable(true).
 		Height(height).
-		Value(&picked)
+		Value(&picked).
+		// Enter with nothing chosen would export nothing; say so instead.
+		Validate(func(v []int) error {
+			if len(v) == 0 {
+				return errors.New("select at least one with x, or ctrl+a for all; ctrl+c cancels")
+			}
+			return nil
+		})
 
 	err := huh.NewForm(huh.NewGroup(list)).WithTheme(pickerTheme()).Run()
 	if errors.Is(err, huh.ErrUserAborted) {
@@ -51,7 +58,8 @@ func pickList(items []Item, noun string) ([]int, error) {
 
 // pickerTheme is readable without telling colours apart. Selection shows as
 // [x] against [ ] and as bold against regular weight, so colour only adds to
-// what shape already says. Nothing is dimmed, because faint grey is the first
+// what shape already says. Error text is bold yellow, and its words carry
+// the meaning. Nothing is dimmed, because faint grey is the first
 // thing to disappear on a dark background. Colours are the terminal's own
 // bright white (15) and bright yellow (11), so they follow the user's palette.
 func pickerTheme() *huh.Theme {
@@ -68,6 +76,8 @@ func pickerTheme() *huh.Theme {
 		f.SelectedPrefix = strong.SetString("[x] ")
 		f.UnselectedOption = plain
 		f.UnselectedPrefix = plain.SetString("[ ] ")
+		f.ErrorIndicator = cursor
+		f.ErrorMessage = cursor
 	}
 	t.Help.ShortKey = strong
 	t.Help.ShortDesc = plain

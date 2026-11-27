@@ -13,8 +13,9 @@ func TestParseSelection(t *testing.T) {
 		want    []int
 		wantErr string
 	}{
-		{"", []int{1, 2, 3, 4, 5}, ""},
-		{"  ", []int{1, 2, 3, 4, 5}, ""},
+		{"", nil, ""},   // nothing is chosen by default
+		{"  ", nil, ""}, // whitespace is still nothing
+		{"*", []int{1, 2, 3, 4, 5}, ""},
 		{"2", []int{2}, ""},
 		{"1,3", []int{1, 3}, ""},
 		{"4-2", []int{2, 3, 4}, ""}, // a reversed range still reads as a range

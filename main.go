@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"flag"
 	"fmt"
@@ -431,6 +432,9 @@ func (ex *dbExport) folders() map[string]*folderNode {
 func (ex *dbExport) writeIndexes(dir string) error {
 	nodes := ex.folders()
 	if len(ex.items) > 0 {
+		if err := ex.writeCatalog(filepath.Join(dir, "catalog.csv")); err != nil {
+			return err
+		}
 		for path, n := range nodes {
 			if err := writeText(filepath.Join(dir, "questions", filepath.FromSlash(path), "index.md"), ex.folderIndex(n, nodes)); err != nil {
 				return err
@@ -461,6 +465,7 @@ func (ex *dbExport) dbIndex(nodes map[string]*folderNode) string {
 			fmt.Fprintf(&b, "\nSQL snippets these questions use: %s.\n", link("_snippets.md", "questions/_snippets.md"))
 		}
 		b.WriteString("\n## Every Question and Dashboard\n\n")
+		fmt.Fprintf(&b, "The same list as a spreadsheet, for Excel or a script: %s.\n\n", link("catalog.csv", "catalog.csv"))
 		itemTable(&b, ex.items, "questions/", true)
 	}
 	return b.String()
@@ -543,6 +548,59 @@ func itemTable(b *strings.Builder, items []itemFile, prefix string, withCollecti
 		row = append(row, cell(dash), cell(it.SQL), cell(it.Updated), thousands(tokens(it.bytes)))
 		b.WriteString("| " + strings.Join(row, " | ") + " |\n")
 	}
+}
+
+// catalogHeader names the catalog's columns. collection_id and id are what a
+// script needs to act on a row; the rest is for people reading it.
+var catalogHeader = []string{
+	"database", "database_id", "kind", "id", "label", "name", "collection_id", "collection_path",
+	"display", "sql", "updated", "on_dashboards", "file", "tokens",
+}
+
+// writeCatalog writes every question and dashboard as one CSV row. It starts
+// with a UTF-8 byte-order mark so Excel reads accented names correctly.
+func (ex *dbExport) writeCatalog(path string) error {
+	_, err := writeCounted(path, func(w io.Writer) error {
+		if _, err := io.WriteString(w, "\ufeff"); err != nil {
+			return err
+		}
+		cw := csv.NewWriter(w)
+		if err := cw.Write(catalogHeader); err != nil {
+			return err
+		}
+		for _, it := range ex.items {
+			file := "questions/" + it.file
+			if it.dir != "" {
+				file = "questions/" + it.dir + "/" + it.file
+			}
+			row := []string{
+				ex.db.Name, strconv.Itoa(ex.db.ID), it.Kind, strconv.Itoa(it.ID), it.Label, it.Name,
+				strconv.Itoa(it.Collection.ID), it.Collection.Path, it.Display, it.SQL, it.Updated,
+				strings.Join(it.Dashboards, "; "), file, strconv.Itoa(tokens(it.bytes)),
+			}
+			for i := range row {
+				row[i] = csvSafe(row[i])
+			}
+			if err := cw.Write(row); err != nil {
+				return err
+			}
+		}
+		cw.Flush()
+		return cw.Error()
+	})
+	return err
+}
+
+// csvSafe stops a spreadsheet from running a cell as a formula. Names come
+// from whoever wrote them in Metabase, and Excel treats a cell starting with
+// = + - @ (or a tab or carriage return) as a formula, which is a known way to
+// attack whoever opens the file. A leading apostrophe makes Excel show the
+// text as written; a script reading the file back strips it.
+func csvSafe(s string) string {
+	if s != "" && strings.ContainsRune("=+-@\t\r", rune(s[0])) {
+		return "'" + s
+	}
+	return s
 }
 
 // tokens estimates how much of an AI assistant's reading capacity a file

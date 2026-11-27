@@ -126,7 +126,7 @@ To save it somewhere else, name the folder:
 
 The one question is which databases. Most people use Metabase with one database per project, team, or study, so that choice decides everything else: each database's schemas come along, and so does every collection holding questions that query it. Collections built on databases you did not pick are left out.
 
-Every database starts selected, marked `[x]`. Move with the arrow keys and press **x** to deselect one, or **ctrl+a** to select all again. With a long list, type **/** and part of a name to narrow it, for example `PROD`. Press **enter** to confirm, or **ctrl+c** to cancel. The keys are always listed at the bottom of the screen. If there is only one database, it is chosen for you.
+Nothing starts selected. Move with the arrow keys and press **x** to select a database, marked `[x]`, or **ctrl+a** to select them all. With a long list, type **/** and part of a name to narrow it, for example `PROD`. Press **enter** to confirm, or **ctrl+c** to cancel. Enter does nothing until at least one database is selected, so an empty export cannot happen by accident. The keys are always listed at the bottom of the screen. If there is only one database, it is chosen for you.
 
 If you already know what you want, name it and skip the question. Patterns work, with `*` standing for anything:
 
@@ -142,7 +142,7 @@ To narrow further inside the databases you pick, name schemas or collections the
 ./metabase-omnibus -database "Sales DB" -schema "reporting" -collection "*Finance*"
 ```
 
-To take everything without being asked, add `-all`. If the list does not draw properly in your terminal, add `-plain` to type your choice instead: numbers (`1,4,7-9`), names, or patterns (`sales*`). Put a minus on every entry to leave those out instead (`-*_test`).
+To take everything without being asked, add `-all`. If the list does not draw properly in your terminal, add `-plain` to type your choice instead: numbers (`1,4,7-9`), names, patterns (`sales*`), or `*` for everything. Put a minus on every entry to take everything except those (`-*_test`).
 
 ---
 
@@ -200,6 +200,7 @@ metabase-example-20261120-1925/
 ├── index.md                            every database, with counts and token totals
 ├── Sales DB/
 │   ├── index.md                        its schemas, its collections, and every question in a table
+│   ├── catalog.csv                     the same table of questions, for Excel or a script
 │   ├── schema/
 │   │   ├── public.json                 one file per schema
 │   │   └── reporting.json
@@ -217,7 +218,9 @@ metabase-example-20261120-1925/
     └── ...
 ```
 
-A database's `index.md` lists every question and dashboard in one table: its ID, name, type, collection, the dashboards that show it, whether its SQL was written by hand or translated from the visual editor, when it last changed, and its size in tokens. Each name links to its file.
+A database's `index.md` lists every question and dashboard in one table, and `catalog.csv` beside it holds the same rows for Excel or a script: its ID, name, type, collection, the dashboards that show it, whether its SQL was written by hand or translated from the visual editor, when it last changed, and its size in tokens. Each name links to its file.
+
+In `catalog.csv`, any name starting with `=`, `+`, `-`, or `@` gets a leading `'`, so Excel shows it as text instead of running it as a formula. Names come from whoever wrote them in Metabase, and a spreadsheet that runs them would be a way to attack whoever opens the file.
 
 That makes the indexes the place to start with an assistant. Give it a database's `index.md` and it can tell you which questions to read next. To ask about one report, give it that report's file and the schema files it reads.
 
@@ -285,7 +288,7 @@ Everything goes through Metabase's own API, the same one its web pages use. Thes
 | Call | What it returns | What the tool keeps |
 | --- | --- | --- |
 | `GET /api/database` | Every database your sign-in can see | Name, engine, and number. Never the connection details |
-| `GET /api/database/:id/metadata` | Every table and column Metabase knows about | Names, types, and keys. Never the statistics Metabase gathered from your data |
+| `GET /api/database/:id/metadata` | Every table and column Metabase knows about. Metabase's reference says this also returns field values, which are real data | Names, types, and keys. Field values and the statistics Metabase gathered from your data are discarded on arrival and never written; the tests check this |
 | `GET /api/collection` | Every collection, with where it sits in the tree | Names and paths, minus personal collections |
 | `GET /api/card` and `GET /api/card/:id` | Questions, models, and metrics | Definitions and SQL. Never results, filter defaults, or who made them |
 | `POST /api/dataset/native` | The SQL behind a visual-editor question | The SQL. Metabase translates the question without running it |
@@ -308,20 +311,26 @@ Metabase's paid plans include [serialization](https://www.metabase.com/docs/late
 
 ---
 
-## What else the Metabase API can do, and where it stops
+## What the Metabase API can do, and where it stops
 
-This tool uses a small, read-only corner of the API. The rest is worth knowing about, both for what you can build and for what this tool deliberately leaves alone.
+This tool uses a small, read-only corner of the API. Here is all of it, counted from Metabase's own machine-readable reference, [`docs/api.json`](https://github.com/metabase/metabase/blob/master/docs/api.json), as it stood in November 2026: **765 operations in 128 areas**. 557 of them work on every plan. The other 208, in 47 areas under `/api/ee/`, are for Metabase's paid Pro and Enterprise plans.
 
-**What the API can do.** Metabase's [introduction to its API](https://www.metabase.com/learn/administration/metabase-api) covers:
+| What you can work with | Areas | Read | Change | Examples, from Metabase's own descriptions |
+| --- | ---: | ---: | ---: | --- |
+| Questions, dashboards, and collections | 14 | 63 | 58 | Create and edit questions and dashboards; move many questions into one collection at once; revert something to an earlier revision; snippets, bookmarks, and timelines |
+| Running queries and sharing results | 10 | 59 | 29 | Run a query and get its results; get the SQL behind a visual-editor question; public links; embedding with signed tokens |
+| Databases, tables, and fields | 14 | 52 | 63 | Add a database; edit table and column details; turn an uploaded CSV into a new table and model; caching; transforms |
+| Shared definitions | 6 | 20 | 25 | Metrics, segments, measures, glossary entries, and actions |
+| People, access, and sign-in | 10 | 23 | 38 | Create users; update all permissions in one batch; create API keys; sign in and out; login history |
+| Alerts and subscriptions | 7 | 14 | 26 | Dashboard subscriptions, alerts, and their Slack and email channels |
+| Settings and running Metabase | 14 | 22 | 15 | Read and change settings; first-time setup; task history; logging; search |
+| AI features | 5 | 12 | 33 | Metabot and the AI agent endpoints |
+| Other | 1 | 2 | 3 | `/api/osi`, not covered here |
+| Paid plans (`/api/ee/`) | 47 | 99 | 109 | Serialization, user provisioning (SCIM), the audit app, advanced permissions, two-factor sign-in, and more |
 
-| Area | Examples |
-| --- | --- |
-| Setting up a Metabase | Create the first admin, change settings, set up email |
-| Databases | Add a database, check a connection, rescan its tables |
-| People and permissions | Create, update, and deactivate users; manage groups and who is in them |
-| Questions and dashboards | Create and edit questions; build dashboards and place questions on them |
-| Running queries | Run a saved question or a new query and get its rows back |
-| Everything else | Collections, search, sessions, and embedding |
+"Read" counts `GET` calls and "Change" counts the rest, which is an approximation: some `POST` calls only read. The one this tool uses to get a question's SQL is a `POST` that changes nothing.
+
+For one call in detail, Metabase's [API reference](https://www.metabase.com/docs/latest/api) is the friendly version of that same file, and its [introduction to the API](https://www.metabase.com/learn/administration/metabase-api) walks through a few with examples.
 
 **Where it stops:**
 
@@ -329,7 +338,7 @@ This tool uses a small, read-only corner of the API. The rest is worth knowing a
 - **A key can do what its group can do, nothing more.** Creating and listing keys needs an admin.
 - **Results are capped.** By default, a query run through the API returns at most 2,000 rows of raw data, or 10,000 rows when the query groups and summarizes. An admin running Metabase on their own server can raise both limits with [environment variables](https://www.metabase.com/docs/latest/configuring-metabase/environment-variables); on Metabase Cloud, Metabase support can change them.
 - **Rate limits are not documented.** Metabase's API guide does not say how many requests it allows. This tool sends one request at a time, which keeps the load on your Metabase to roughly what one person clicking through it would cause.
-- **Some endpoints are paid features.** Serialization is one. Metabase's [API reference](https://www.metabase.com/docs/latest/api) marks the others.
+- **Some endpoints are paid features.** Everything under `/api/ee/` needs a Pro or Enterprise plan.
 
 **What this tool will not do with it**, by design: run a query, read a result, or change anything. Every call it makes is in the table in the section above. If you build on the API yourself, the same rule is a good default: give your key a group that can read only what the job needs.
 

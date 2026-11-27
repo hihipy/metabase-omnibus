@@ -22,8 +22,9 @@ type Item struct {
 // nil if the user cancelled. noun names the items in prompts ("databases").
 //
 // It uses the interactive list in huh.go, and the typed prompt when plain is
-// set. The typed prompt takes an empty line for everything, or numbers,
-// ranges, names, and globs. A minus on every entry drops instead of takes.
+// set. Nothing is chosen by default: the typed prompt takes numbers, ranges,
+// names, and globs, with * for everything. A minus on every entry drops
+// instead of takes.
 func Pick(items []Item, noun string, plain bool, out io.Writer) ([]int, error) {
 	if len(items) == 0 {
 		return nil, nil
@@ -51,8 +52,8 @@ func pickTyped(items []Item, noun string, in io.Reader, out io.Writer) ([]int, e
 		// Swap the checkbox for the number the prompt asks for.
 		fmt.Fprintf(out, "  %*d %s\n", numWidth, i+1, strings.TrimPrefix(line, "  [x] "))
 	}
-	fmt.Fprintln(out, "\nEnter for all. Take with numbers, names, or globs (1,4,7-9 or sales*).")
-	fmt.Fprintln(out, "Put a minus on every entry to drop instead (-12 or -*_test). Type q to cancel.")
+	fmt.Fprintln(out, "\nChoose with numbers, names, or globs (1,4,7-9 or sales*), or * for everything.")
+	fmt.Fprintln(out, "Put a minus on every entry to take everything except those (-12 or -*_test). Type q to cancel.")
 
 	names := make([]string, len(items))
 	for i, it := range items {
@@ -74,7 +75,7 @@ func pickTyped(items []Item, noun string, in io.Reader, out io.Writer) ([]int, e
 			continue
 		}
 		if len(chosen) == 0 {
-			fmt.Fprintln(out, Notice("that leaves nothing to export"))
+			fmt.Fprintln(out, Notice("nothing chosen yet: type numbers, names, or * for everything"))
 			continue
 		}
 		idx := make([]int, len(chosen))
@@ -87,14 +88,15 @@ func pickTyped(items []Item, noun string, in io.Reader, out io.Writer) ([]int, e
 }
 
 // ParseSelection turns a line of input into a sorted list of 1-based indexes
-// into names. An empty line means everything. Taking and dropping cannot be
-// mixed, because "1,-3" reads as either "1, not 3" or "1 through 3".
+// into names. An empty line chooses nothing, so the caller asks again. Taking
+// and dropping cannot be mixed, because "1,-3" reads as either "1, not 3" or
+// "1 through 3".
 func ParseSelection(line string, names []string) ([]int, error) {
 	n := len(names)
 	line = strings.TrimSpace(line)
 	fields := strings.FieldsFunc(line, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
 	if len(fields) == 0 {
-		return seq(n), nil
+		return nil, nil
 	}
 
 	dropping := strings.HasPrefix(fields[0], "-")
@@ -175,14 +177,6 @@ func isNumeric(f string) bool {
 		}
 	}
 	return f != ""
-}
-
-func seq(n int) []int {
-	out := make([]int, n)
-	for i := range out {
-		out[i] = i + 1
-	}
-	return out
 }
 
 // Interactive reports whether stdin is a terminal, so a run in a pipeline

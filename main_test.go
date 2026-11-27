@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"net/url"
 	"os"
 	"path"
@@ -102,6 +103,54 @@ func TestDatabaseIndexListsEveryItem(t *testing.T) {
 	for _, want := range []string{"| D3 |", "| M11 |", "| Q10 |", "Finance > Reports", "question, bar", "native", "compiled", "2026-11-10", "[D3] Sales overview"} {
 		if !strings.Contains(idx, want) {
 			t.Errorf("database index is missing %q", want)
+		}
+	}
+}
+
+func TestCatalog(t *testing.T) {
+	_, files := exportAll(t)
+	raw, ok := files["Sample Database/catalog.csv"]
+	if !ok {
+		t.Fatal("no catalog.csv")
+	}
+	if !strings.HasPrefix(raw, "\ufeff") {
+		t.Error("catalog.csv should start with a UTF-8 byte-order mark for Excel")
+	}
+	rows, err := csv.NewReader(strings.NewReader(strings.TrimPrefix(raw, "\ufeff"))).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(rows[0], ",") != strings.Join(catalogHeader, ",") {
+		t.Errorf("header = %v", rows[0])
+	}
+	if len(rows) != 4 { // header plus D3, M11, Q10
+		t.Fatalf("got %d rows, want a header and 3 items:\n%s", len(rows), raw)
+	}
+	byLabel := map[string][]string{}
+	for _, r := range rows[1:] {
+		byLabel[r[4]] = r
+	}
+	q := byLabel["Q10"]
+	if q == nil || q[2] != "question" || q[6] != "6" || q[7] != "Our analytics > Finance > Reports" ||
+		q[9] != "native" || q[11] != "[D3] Sales overview" || q[12] != "questions/Finance/Reports/Q10 Orders by state.md" {
+		t.Errorf("Q10 row = %v", q)
+	}
+	if _, ok := files["Sample Database/"+q[12]]; !ok {
+		t.Errorf("catalog file column %q does not point at a written file", q[12])
+	}
+}
+
+func TestCSVSafe(t *testing.T) {
+	for in, want := range map[string]string{
+		"=HYPERLINK(\"x\")": "'=HYPERLINK(\"x\")",
+		"+1":                "'+1",
+		"-draft":            "'-draft",
+		"@SUM(A1)":          "'@SUM(A1)",
+		"Orders by state":   "Orders by state",
+		"":                  "",
+	} {
+		if got := csvSafe(in); got != want {
+			t.Errorf("csvSafe(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
