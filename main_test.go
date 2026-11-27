@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hihipy/metabase-omnibus/internal/fakemb"
 	"github.com/hihipy/metabase-omnibus/internal/schema"
@@ -365,4 +366,42 @@ func keys(m map[string]string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func TestSafeNameWindowsAndLength(t *testing.T) {
+	for in, want := range map[string]string{
+		"CON":         "CON_",
+		"nul":         "nul_",
+		"Com1":        "Com1_",
+		"LPT9.json":   "LPT9_.json",
+		"CON .txt":    "CON _.txt",
+		"COM0":        "COM0",
+		"CONSOLE":     "CONSOLE",
+		"Contracts":   "Contracts",
+		"Orders":      "Orders",
+		"(no schema)": "(no schema)",
+	} {
+		if got := safeName(in); got != want {
+			t.Errorf("safeName(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	long := strings.Repeat("é", 150) // 300 bytes
+	got := safeName(long)
+	if len(got) > maxName || !utf8.ValidString(got) {
+		t.Errorf("safeName of a 300-byte name gave %d bytes, valid UTF-8 %v", len(got), utf8.ValidString(got))
+	}
+	if got := safeName(strings.Repeat("a", maxName-1) + " ." + "b"); strings.HasSuffix(got, " ") || strings.HasSuffix(got, ".") {
+		t.Errorf("a cut name ends in a space or dot: %q", got[len(got)-3:])
+	}
+}
+
+func TestSchemaLabel(t *testing.T) {
+	if schemaLabel("") != "(no schema)" || schemaLabel("PUBLIC") != "PUBLIC" {
+		t.Errorf("schemaLabel: %q, %q", schemaLabel(""), schemaLabel("PUBLIC"))
+	}
+	doc := schema.Doc{Metadata: schema.DocMetadata{Engine: "h2"}}
+	if got := schemaIndex(doc, "Sample Database", nil); !strings.HasPrefix(got, "# Schema (no schema)\n") {
+		t.Errorf("schema index heading: %q", strings.SplitN(got, "\n", 2)[0])
+	}
 }

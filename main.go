@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hihipy/metabase-omnibus/internal/content"
 	"github.com/hihipy/metabase-omnibus/internal/metabase"
@@ -279,8 +280,14 @@ func (c *countWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// maxName caps a folder or file name in bytes. macOS and Linux refuse names
+// over 255 bytes, and an item's file name adds an ID and an extension to it.
+const maxName = 200
+
 // safeName turns a name into a folder or file name that works on Windows,
-// macOS, and Linux.
+// macOS, and Linux: no characters any of them refuse, no leading or trailing
+// space or dot, at most maxName bytes, and never a name Windows reserves for
+// a device, such as CON or NUL.
 func safeName(s string) string {
 	s = strings.Map(func(r rune) rune {
 		if r < 32 || strings.ContainsRune(`<>:"/\|?*`, r) {
@@ -289,10 +296,38 @@ func safeName(s string) string {
 		return r
 	}, s)
 	s = strings.Trim(s, " .")
+	if len(s) > maxName {
+		cut := maxName
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = strings.Trim(s[:cut], " .")
+	}
 	if s == "" {
 		return "_"
 	}
+	if reservedName(s) {
+		// CON.json becomes CON_.json, keeping any extension.
+		i := strings.IndexByte(s, '.')
+		if i < 0 {
+			i = len(s)
+		}
+		s = s[:i] + "_" + s[i:]
+	}
 	return s
+}
+
+// reservedName reports whether Windows treats a name as a device. The test
+// is on the part before the first dot, so CON.json is reserved too.
+func reservedName(s string) bool {
+	base, _, _ := strings.Cut(s, ".")
+	base = strings.ToUpper(strings.TrimRight(base, " "))
+	switch base {
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
+		return true
+	}
+	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) &&
+		base[3] >= '1' && base[3] <= '9'
 }
 
 // defaultOut names the export folder after the instance and the time, such as

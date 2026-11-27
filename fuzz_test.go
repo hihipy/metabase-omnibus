@@ -8,10 +8,10 @@ import (
 
 // FuzzSafeName checks the promises a file name has to keep on every platform
 // the tool runs on: no control characters, none of the characters Windows
-// refuses, no leading or trailing space or dot, never empty, and stable when
-// applied twice.
+// refuses, no leading or trailing space or dot, no Windows device name, at
+// most maxName bytes, never empty, and stable when applied twice.
 func FuzzSafeName(f *testing.F) {
-	for _, s := range []string{"", " ", ".", "..", "Orders by state", "a/b\\c", "Q1: <draft>?", " .hidden. ", "tab\there", "\x00", "über", "\xff\xfe"} {
+	for _, s := range []string{"", " ", ".", "..", "Orders by state", "a/b\\c", "Q1: <draft>?", " .hidden. ", "tab\there", "\x00", "über", "\xff\xfe", "CON", "lpt1.json", "nul .md"} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
@@ -26,6 +26,12 @@ func FuzzSafeName(f *testing.F) {
 		}
 		if got != "_" && (strings.Trim(got, " .") != got) {
 			t.Fatalf("safeName(%q) = %q starts or ends with a space or dot", s, got)
+		}
+		if len(got) > maxName+1 { // +1 for the underscore a device name gets
+			t.Fatalf("safeName(%q) is %d bytes", s, len(got))
+		}
+		if reservedName(got) {
+			t.Fatalf("safeName(%q) = %q is a Windows device name", s, got)
 		}
 		if !utf8.ValidString(got) {
 			t.Fatalf("safeName(%q) = %q is not valid UTF-8", s, got)

@@ -261,7 +261,7 @@ A table file is compact JSON:
 ]}
 ```
 
-To get one file per schema instead, with every table in it, add `-schema-layout single`.
+To get one file per schema instead, with every table in it, add `-schema-layout single`. Tables that Metabase reports without a schema, as it does for its own Sample Database, go in a folder named `(no schema)`.
 
 A question file is Markdown:
 

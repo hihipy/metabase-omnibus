@@ -124,7 +124,7 @@ func (ex *dbExport) dbIndex(nodes map[string]*folderNode) string {
 		// The table below links each schema to its index of tables, or to its single file.
 		b.WriteString("## Schemas\n\nThe shape of each schema: tables, columns, types, and keys.\n\n| Schema | Tables | Tokens |\n| --- | ---: | ---: |\n")
 		for _, s := range ex.schemas {
-			fmt.Fprintf(&b, "| %s | %d | %s |\n", link(s.name, s.path), s.tables, thousands(tokens(s.bytes)))
+			fmt.Fprintf(&b, "| %s | %d | %s |\n", link(schemaLabel(s.name), s.path), s.tables, thousands(tokens(s.bytes)))
 		}
 		b.WriteString("\n")
 	}
@@ -151,7 +151,7 @@ func schemaIndex(doc schema.Doc, dbName string, entries []tableEntry) string {
 		total += tokens(e.bytes)
 	}
 	fmt.Fprintf(&b, "# Schema %s\n\nDatabase: %s (%s). %s, about %s tokens in all.\n\n%s %s\n\n[Up](<../../index.md>)\n\n",
-		doc.Metadata.Schema, dbName, doc.Metadata.Engine, plural(len(entries), "table"), thousands(total),
+		schemaLabel(doc.Metadata.Schema), dbName, doc.Metadata.Engine, plural(len(entries), "table"), thousands(total),
 		schema.PrivacyNote, schema.Limitations)
 	b.WriteString("Each table is its own file. Read this list, then load only the tables a question touches.\n\n")
 	b.WriteString("| Table | Columns | Primary key | Points to | Tokens |\n| --- | ---: | --- | --- | ---: |\n")

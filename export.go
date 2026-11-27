@@ -74,12 +74,12 @@ func writeSchema(meta *schema.Metadata, f flags, host, dir string, ex *dbExport,
 		opt.Instance = host
 	}
 	for _, s := range meta.Schemas() {
-		if f.schema != "" && !matchAny(f.schema, s.Name) {
+		if f.schema != "" && !matchAny(f.schema, schemaLabel(s.Name)) {
 			continue
 		}
 		doc := schema.Build(meta, s.Name, opt)
 		if f.schemaLayout == "single" {
-			rel := "schema/" + safeName(s.Name) + ".json"
+			rel := "schema/" + safeName(schemaLabel(s.Name)) + ".json"
 			size, err := writeCounted(filepath.Join(dir, filepath.FromSlash(rel)), func(w io.Writer) error { return schema.WriteDoc(w, doc) })
 			if err != nil {
 				return err
@@ -87,11 +87,11 @@ func writeSchema(meta *schema.Metadata, f flags, host, dir string, ex *dbExport,
 			ex.schemas = append(ex.schemas, schemaFile{name: s.Name, tables: len(doc.Tables), bytes: size, path: rel, files: 1})
 			continue
 		}
-		sf, err := writeTables(doc, filepath.Join(dir, "schema", safeName(s.Name)), ex.db.Name)
+		sf, err := writeTables(doc, filepath.Join(dir, "schema", safeName(schemaLabel(s.Name))), ex.db.Name)
 		if err != nil {
 			return err
 		}
-		sf.path = "schema/" + safeName(s.Name) + "/index.md"
+		sf.path = "schema/" + safeName(schemaLabel(s.Name)) + "/index.md"
 		ex.schemas = append(ex.schemas, sf)
 	}
 	tables := 0
@@ -100,6 +100,18 @@ func writeSchema(meta *schema.Metadata, f flags, host, dir string, ex *dbExport,
 	}
 	fmt.Fprintf(out, "  %s, %s\n", plural(len(ex.schemas), "schema"), plural(tables, "table"))
 	return nil
+}
+
+// noSchema names the tables Metabase reports without a schema, as it does for
+// its own Sample Database.
+const noSchema = "(no schema)"
+
+// schemaLabel is how a schema is named in folders and indexes.
+func schemaLabel(name string) string {
+	if name == "" {
+		return noSchema
+	}
+	return name
 }
 
 // tableEntry is one table file, for its schema's index.
