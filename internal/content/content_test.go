@@ -13,6 +13,7 @@ type run struct {
 	srv      *fakemb.Server
 	cat      *Catalog
 	items    []Item
+	skipped  []Skipped
 	snippets string
 	all      string // every file and the snippets, joined, for scanning
 }
@@ -22,8 +23,11 @@ func export(t *testing.T, opt Options, personal bool) run {
 }
 
 func exportFor(t *testing.T, opt Options, personal bool, dbs map[int]bool) run {
+	return exportWith(t, fakemb.New(t), opt, personal, dbs)
+}
+
+func exportWith(t *testing.T, srv *fakemb.Server, opt Options, personal bool, dbs map[int]bool) run {
 	t.Helper()
-	srv := fakemb.New(t)
 	c, err := metabase.New(context.Background(), metabase.Config{URL: srv.URL, APIKey: fakemb.APIKey, AllowHTTP: true})
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +43,7 @@ func exportFor(t *testing.T, opt Options, personal bool, dbs map[int]bool) run {
 	for _, col := range cat.Collections {
 		keep[col.ID] = true
 	}
-	items, snippets, err := Export(context.Background(), c, cat, keep, opt)
+	items, snippets, skipped, err := Export(context.Background(), c, cat, keep, opt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +52,7 @@ func exportFor(t *testing.T, opt Options, personal bool, dbs map[int]bool) run {
 		b.WriteString(it.Markdown)
 	}
 	b.WriteString(snippets)
-	return run{srv, cat, items, snippets, b.String()}
+	return run{srv, cat, items, skipped, snippets, b.String()}
 }
 
 func TestCollectionsSkipPersonalAndArchived(t *testing.T) {
@@ -201,5 +205,43 @@ func TestItemDetails(t *testing.T) {
 	}
 	if r.items[0].Label != "D3" {
 		t.Errorf("dashboards should come first in their collection; first item is %s", r.items[0].Label)
+	}
+}
+
+func TestOneFailureSkipsOneItem(t *testing.T) {
+	srv := fakemb.New(t)
+	srv.Deny = map[string]int{"/api/card/11": 403, "/api/dashboard/3": 500}
+	r := exportWith(t, srv, Options{}, false, nil)
+	if len(r.skipped) != 2 {
+		t.Fatalf("skipped = %+v, want the model and the dashboard", r.skipped)
+	}
+	got := r.skipped[0].Label + " " + r.skipped[1].Label
+	if got != "D3 M11" {
+		t.Errorf("skipped labels = %q, want D3 then M11", got)
+	}
+	for _, sk := range r.skipped {
+		if sk.Reason == "" || sk.Collection == "" || sk.Name == "" {
+			t.Errorf("skipped entry is missing details: %+v", sk)
+		}
+	}
+	if !strings.Contains(r.all, "# [Q10] Orders by state") {
+		t.Error("the question that could be fetched was not exported")
+	}
+}
+
+func TestParallelExportKeepsItsOrder(t *testing.T) {
+	one := export(t, Options{Workers: 1}, false)
+	many := export(t, Options{Workers: 8}, false)
+	if one.all != many.all {
+		t.Error("the export changed with the number of workers")
+	}
+}
+
+func TestRootNameComesFromMetabase(t *testing.T) {
+	srv := fakemb.New(t)
+	srv.RootName = "Unsere Analysen"
+	r := exportWith(t, srv, Options{}, false, nil)
+	if r.cat.Collections[0].Path != "Unsere Analysen" || !strings.Contains(r.all, "Unsere Analysen > Finance > Reports") {
+		t.Errorf("root = %q; the root collection's own name should be used", r.cat.Collections[0].Path)
 	}
 }

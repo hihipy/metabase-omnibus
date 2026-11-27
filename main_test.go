@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hihipy/metabase-omnibus/internal/fakemb"
+	"github.com/hihipy/metabase-omnibus/internal/schema"
 )
 
 // exportAll runs the whole command against the fake and returns every file it
@@ -20,6 +21,13 @@ import (
 func exportAll(t *testing.T, extra ...string) (*fakemb.Server, map[string]string) {
 	t.Helper()
 	srv := fakemb.New(t)
+	return srv, exportFrom(t, srv, extra...)
+}
+
+// exportFrom runs the whole command against a given fake, so a test can set
+// it up to fail first.
+func exportFrom(t *testing.T, srv *fakemb.Server, extra ...string) map[string]string {
+	t.Helper()
 	out := t.TempDir()
 	t.Setenv("METABASE_API_KEY", fakemb.APIKey)
 	t.Setenv("METABASE_USERNAME", "")
@@ -43,7 +51,7 @@ func exportAll(t *testing.T, extra ...string) (*fakemb.Server, map[string]string
 		files[filepath.ToSlash(rel)] = string(b)
 		return nil
 	})
-	return srv, files
+	return files
 }
 
 func TestExportLayout(t *testing.T) {
@@ -103,6 +111,45 @@ func TestDatabaseIndexListsEveryItem(t *testing.T) {
 	for _, want := range []string{"| D3 |", "| M11 |", "| Q10 |", "Finance > Reports", "question, bar", "native", "compiled", "2026-11-10", "[D3] Sales overview"} {
 		if !strings.Contains(idx, want) {
 			t.Errorf("database index is missing %q", want)
+		}
+	}
+}
+
+func TestSkippedItemsAreListedNotLost(t *testing.T) {
+	srv := fakemb.New(t)
+	srv.Deny = map[string]int{"/api/card/10": 403}
+	files := exportFrom(t, srv)
+	idx := files["Sample Database/index.md"]
+	if !strings.Contains(idx, "## Not Exported") || !strings.Contains(idx, "| Q10 | Orders by state |") || !strings.Contains(idx, "403") {
+		t.Errorf("the database index should list the skipped question and why:\n%s", idx)
+	}
+	if _, ok := files["Sample Database/questions/Finance/M11 Order base.md"]; !ok {
+		t.Error("one denied question stopped the rest of the export")
+	}
+}
+
+func TestUnreadableDatabaseDoesNotStopTheRun(t *testing.T) {
+	srv := fakemb.New(t)
+	srv.Deny = map[string]int{"/api/database/1/metadata": 403}
+	t.Setenv("METABASE_API_KEY", fakemb.APIKey)
+	out := t.TempDir()
+	if err := run(context.Background(), []string{"-url", srv.URL, "-allow-http", "-all", "-out", out}, true, true); err != nil {
+		t.Fatal(err)
+	}
+	// With the only database unreadable there is nothing to write, and the
+	// run still ends cleanly instead of with an error.
+	if _, err := os.Stat(filepath.Join(out, "index.md")); err == nil {
+		t.Error("an index was written for an export with nothing in it")
+	}
+}
+
+func TestRootIndexListsFailedDatabases(t *testing.T) {
+	ok := &dbExport{db: schema.Database{ID: 1, Name: "Sales DB", Engine: "postgres"}, folder: "Sales DB",
+		schemas: []schemaFile{{name: "public", tables: 3, bytes: 400}}}
+	md := rootIndex([]*dbExport{ok}, []failedDB{{"Finance DB", "GET /api/database/2/metadata: HTTP 403"}}, "mb.example.com", false)
+	for _, want := range []string{"[Sales DB](<Sales DB/index.md>)", "## Not Exported", "| Finance DB | GET /api/database/2/metadata: HTTP 403 |"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("root index is missing %q:\n%s", want, md)
 		}
 	}
 }

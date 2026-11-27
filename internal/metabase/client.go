@@ -5,6 +5,9 @@
 //   - Plain http:// is refused unless the caller opts in.
 //   - Redirects are refused. Go forwards custom headers such as x-api-key
 //     across redirects, so following one could hand the key to another host.
+//
+// Temporary failures (a dropped connection, 429, 502, 503, 504) are retried
+// with backoff, honouring Retry-After, so one hiccup does not end a long run.
 package metabase
 
 import (
@@ -19,14 +22,18 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// Config holds connection settings. Set APIKey, or Username and Password.
+// Config holds connection settings. Set APIKey, or Username and Password, or
+// Session: a session token from a browser sign-in, for single sign-on users
+// with neither.
 type Config struct {
 	URL       string
 	APIKey    string
+	Session   string
 	Username  string
 	Password  string
 	CABundle  string // optional PEM file, added to the system pool
@@ -36,10 +43,16 @@ type Config struct {
 
 // Client talks to one Metabase instance.
 type Client struct {
-	base    *url.URL
-	http    *http.Client
-	apiKey  string
-	session string
+	base        *url.URL
+	http        *http.Client
+	apiKey      string
+	session     string
+	ownsSession bool // signed in with a password, so Close signs out
+
+	// Retries is how many times a temporary failure is retried; Sleep waits
+	// between tries. Both are fields so tests can run without waiting.
+	Retries int
+	Sleep   func(time.Duration)
 }
 
 // New validates the config, builds the HTTP client, and signs in if needed.
@@ -79,8 +92,11 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		timeout = 60 * time.Second
 	}
 	c := &Client{
-		base:   base,
-		apiKey: cfg.APIKey,
+		base:    base,
+		apiKey:  cfg.APIKey,
+		session: cfg.Session,
+		Retries: 3,
+		Sleep:   time.Sleep,
 		http: &http.Client{
 			Timeout:   timeout,
 			Transport: &http.Transport{TLSClientConfig: tlsCfg, Proxy: http.ProxyFromEnvironment},
@@ -90,9 +106,9 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 		},
 	}
 
-	if c.apiKey == "" {
+	if c.apiKey == "" && c.session == "" {
 		if cfg.Username == "" || cfg.Password == "" {
-			return nil, errors.New("no credentials: set METABASE_API_KEY, or METABASE_USERNAME and METABASE_PASSWORD")
+			return nil, errors.New("no credentials: set METABASE_API_KEY, or METABASE_USERNAME and METABASE_PASSWORD, or METABASE_SESSION")
 		}
 		var out struct {
 			ID string `json:"id"`
@@ -105,6 +121,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 			return nil, errors.New("signing in: Metabase returned no session")
 		}
 		c.session = out.ID
+		c.ownsSession = true
 	}
 	return c, nil
 }
@@ -123,33 +140,54 @@ func (c *Client) Post(ctx context.Context, path string, body, out any) error {
 	return c.do(ctx, http.MethodPost, path, nil, body, out)
 }
 
-// Close ends a username/password session. API keys need no cleanup.
+// Close ends a session this client signed in for. A session token passed in
+// belongs to the user's browser and is left alone; API keys need no cleanup.
 func (c *Client) Close(ctx context.Context) {
-	if c.session != "" {
+	if c.ownsSession && c.session != "" {
 		_ = c.do(ctx, http.MethodDelete, "/api/session", nil, nil, nil)
 		c.session = ""
 	}
 }
 
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
-	u := *c.base
-	u.Path = strings.TrimRight(c.base.Path, "/") + path
-	u.RawQuery = query.Encode()
-
-	var reader io.Reader
+	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		reader = bytes.NewReader(b)
+		payload = b
+	}
+	for attempt := 0; ; attempt++ {
+		err, wait := c.once(ctx, method, path, query, payload, out)
+		if err == nil || wait < 0 || attempt >= c.Retries || ctx.Err() != nil {
+			return err
+		}
+		if wait == 0 {
+			wait = time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s
+		}
+		c.Sleep(wait)
+	}
+}
+
+// once makes one request. wait is negative when the failure is permanent,
+// zero for a temporary failure with no hint, and Metabase's Retry-After
+// (capped at 30 seconds) when it gives one.
+func (c *Client) once(ctx context.Context, method, path string, query url.Values, payload []byte, out any) (err error, wait time.Duration) {
+	u := *c.base
+	u.Path = strings.TrimRight(c.base.Path, "/") + path
+	u.RawQuery = query.Encode()
+
+	var reader io.Reader
+	if payload != nil {
+		reader = bytes.NewReader(payload)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), reader)
 	if err != nil {
-		return err
+		return err, -1
 	}
 	req.Header.Set("Accept", "application/json")
-	if body != nil {
+	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if c.apiKey != "" {
@@ -161,22 +199,57 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
+		var redirect *url.Error
+		if errors.As(err, &redirect) && strings.Contains(err.Error(), "refusing redirect") {
+			return fmt.Errorf("%s %s: %w", method, path, err), -1
+		}
+		return fmt.Errorf("%s %s: %w", method, path, err), 0 // network trouble: try again
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
-		return &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: c.scrub(string(snippet))}
+		herr := &HTTPError{Method: method, Path: path, Status: resp.StatusCode, Body: c.scrub(string(snippet))}
+		switch resp.StatusCode {
+		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return herr, retryAfter(resp.Header.Get("Retry-After"))
+		}
+		return herr, -1
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil
+		return nil, 0
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("%s %s: decoding response: %w", method, path, err)
+		return fmt.Errorf("%s %s: decoding response: %w", method, path, err), -1
 	}
-	return nil
+	return nil, 0
+}
+
+// retryAfter reads a Retry-After header given in seconds, capped at 30.
+func retryAfter(h string) time.Duration {
+	n, err := strconv.Atoi(strings.TrimSpace(h))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	if n > 30 {
+		n = 30
+	}
+	return time.Duration(n) * time.Second
+}
+
+// Temporary reports whether an error is worth retrying later: a network
+// failure, or a busy or overloaded server.
+func Temporary(err error) bool {
+	var he *HTTPError
+	if errors.As(err, &he) {
+		switch he.Status {
+		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		}
+		return false
+	}
+	return err != nil
 }
 
 // scrub removes credentials from text that may be shown to the user.

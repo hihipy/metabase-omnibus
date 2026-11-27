@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 const key = "secret-key-123"
@@ -117,5 +118,114 @@ func TestNeedsCredentials(t *testing.T) {
 	_, err := New(context.Background(), Config{URL: "https://metabase.example.com"})
 	if err == nil || !strings.Contains(err.Error(), "no credentials") {
 		t.Errorf("err = %v, want a missing-credentials error", err)
+	}
+}
+
+// flaky answers with the given statuses in order, then 200.
+func flaky(t *testing.T, statuses []int, retryAfter string) (*httptest.Server, *int) {
+	t.Helper()
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls <= len(statuses) {
+			if retryAfter != "" {
+				w.Header().Set("Retry-After", retryAfter)
+			}
+			w.WriteHeader(statuses[calls-1])
+			return
+		}
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &calls
+}
+
+func testClient(t *testing.T, url string) (*Client, *[]time.Duration) {
+	t.Helper()
+	c, err := New(context.Background(), Config{URL: url, APIKey: key, AllowHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	c.Sleep = func(d time.Duration) { waits = append(waits, d) }
+	return c, &waits
+}
+
+func TestRetriesTemporaryFailures(t *testing.T) {
+	srv, calls := flaky(t, []int{503, 502}, "")
+	c, waits := testClient(t, srv.URL)
+	var out map[string]bool
+	if err := c.Get(context.Background(), "/api/card/1", nil, &out); err != nil || !out["ok"] {
+		t.Fatalf("err = %v, out = %v; want success after two retries", err, out)
+	}
+	if *calls != 3 || len(*waits) != 2 || (*waits)[0] != time.Second || (*waits)[1] != 2*time.Second {
+		t.Errorf("calls = %d, waits = %v; want 3 calls with 1s then 2s backoff", *calls, *waits)
+	}
+}
+
+func TestHonoursRetryAfterWithACap(t *testing.T) {
+	srv, _ := flaky(t, []int{429}, "120")
+	c, waits := testClient(t, srv.URL)
+	if err := c.Get(context.Background(), "/api/card/1", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(*waits) != 1 || (*waits)[0] != 30*time.Second {
+		t.Errorf("waits = %v, want Retry-After 120 capped to 30s", *waits)
+	}
+}
+
+func TestGivesUpAfterRetries(t *testing.T) {
+	srv, calls := flaky(t, []int{503, 503, 503, 503, 503}, "")
+	c, _ := testClient(t, srv.URL)
+	err := c.Get(context.Background(), "/api/card/1", nil, nil)
+	if !Temporary(err) || *calls != 4 {
+		t.Errorf("err = %v, calls = %d; want a temporary error after 1 try and 3 retries", err, *calls)
+	}
+}
+
+func TestPermanentFailuresAreNotRetried(t *testing.T) {
+	srv, calls := flaky(t, []int{403}, "")
+	c, waits := testClient(t, srv.URL)
+	err := c.Get(context.Background(), "/api/card/1", nil, nil)
+	var he *HTTPError
+	if !errors.As(err, &he) || he.Status != 403 || Temporary(err) || *calls != 1 || len(*waits) != 0 {
+		t.Errorf("err = %v, calls = %d, waits = %v; want one 403 and no retry", err, *calls, *waits)
+	}
+}
+
+func TestRedirectsAreNotRetried(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Redirect(w, r, "https://elsewhere.example.com/", http.StatusFound)
+	}))
+	defer srv.Close()
+	c, _ := testClient(t, srv.URL)
+	if err := c.Get(context.Background(), "/api/database", nil, nil); err == nil || calls != 1 {
+		t.Errorf("err = %v, calls = %d; want a refused redirect on the first try", err, calls)
+	}
+}
+
+func TestBrowserSessionIsUsedAndNotSignedOut(t *testing.T) {
+	var gotSession string
+	var signedOut bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			signedOut = true
+		}
+		gotSession = r.Header.Get("X-Metabase-Session")
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c, err := New(context.Background(), Config{URL: srv.URL, Session: "browser-token", AllowHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), "/api/database", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	c.Close(context.Background())
+	if gotSession != "browser-token" || signedOut {
+		t.Errorf("session header = %q, signed out = %v; want the token used and the browser left signed in", gotSession, signedOut)
 	}
 }

@@ -15,6 +15,16 @@
 
 MetabaseOmnibus reads a Metabase and writes down how it is built: the shape of every database behind it, and every question, model, metric, and dashboard people made on top of it, with the SQL behind each one. Hand the result to ChatGPT or Claude and ask it to write a query, review a report, or find what could be cleaned up. It never sees a single record.
 
+**Quick start:** download the file for your computer from [Releases](https://github.com/hihipy/metabase-omnibus/releases), get an API key from your Metabase admin, then:
+
+```bash
+export METABASE_URL="https://metabase.example.com"
+export METABASE_API_KEY="paste-your-key-here"
+./metabase-omnibus
+```
+
+Pick the databases you want, and the export lands in your Downloads folder. On Windows, use `$env:METABASE_URL = "..."` and `.\metabase-omnibus.exe` instead. The sections below explain each step.
+
 ---
 
 ## What problem this solves
@@ -31,33 +41,37 @@ MetabaseOmnibus does both jobs. It collects the whole picture, and it leaves out
 
 ## Installing it
 
-You need two things, and both are free.
+### The quick way: download it
 
-### Step 1: install Go
+Go to [Releases](https://github.com/hihipy/metabase-omnibus/releases) and download the file for your computer:
 
-Go is the programming language this tool is written in. Installing it gives you the command that turns the source code into a working program.
+| Your computer | File to download |
+| --- | --- |
+| Windows | `windows-amd64.zip` (or `windows-arm64.zip` on an ARM laptop such as a Surface Pro X) |
+| Mac with Apple silicon (M1 and later) | `darwin-arm64.tar.gz` |
+| Mac with an Intel chip | `darwin-amd64.tar.gz` |
+| Linux | `linux-amd64.tar.gz` (or `linux-arm64.tar.gz`) |
 
-**macOS.** If you have [Homebrew](https://brew.sh), open **Terminal** and run:
+Unpack it. Inside is the program, `metabase-omnibus` (`metabase-omnibus.exe` on Windows), with this README and the license. That one file is the whole tool: nothing to install, nothing running in the background.
 
-```bash
-brew install go
-```
+**The first run may get a warning**, because the program is not signed with a paid Apple or Microsoft certificate:
 
-If you do not have Homebrew, download the macOS installer from [go.dev/dl](https://go.dev/dl/) and double-click it.
+- **macOS** may say the developer cannot be verified. In Terminal, in the folder with the program, run `xattr -d com.apple.quarantine metabase-omnibus` once.
+- **Windows** may block a program downloaded from the internet. In PowerShell, in the folder with the program, run `Unblock-File .\metabase-omnibus.exe` once.
+
+To confirm the download is exactly what was published, compare its fingerprint with the one listed in `SHA256SUMS.txt` on the same Releases page: `shasum -a 256 <file>` on macOS or Linux, `Get-FileHash <file>` on Windows.
+
+### Or build it yourself
+
+You need Go, the programming language this tool is written in. It is free.
+
+**macOS.** If you have [Homebrew](https://brew.sh), open **Terminal** and run `brew install go`. If you do not have Homebrew, download the macOS installer from [go.dev/dl](https://go.dev/dl/) and double-click it.
 
 **Windows.** Download the Windows installer from [go.dev/dl](https://go.dev/dl/) and run it. Then use **PowerShell** wherever this page says Terminal.
 
 **Linux.** Use your package manager, for example `sudo apt install golang-go`, or download from [go.dev/dl](https://go.dev/dl/).
 
-To check it worked, run this. It should print a version number.
-
-```bash
-go version
-```
-
-### Step 2: download and build this tool
-
-In Terminal, run these three lines one at a time:
+Then run these three lines one at a time:
 
 ```bash
 git clone https://github.com/hihipy/metabase-omnibus.git
@@ -67,8 +81,6 @@ go build
 
 The first line copies this project to your computer. The second moves into the folder it created. The third builds the program, which takes a few seconds and prints nothing when it works.
 
-You now have a file called `metabase-omnibus` (`metabase-omnibus.exe` on Windows) in that folder. That is the whole tool: one file, nothing installed anywhere else, nothing running in the background.
-
 ---
 
 ## Signing in
@@ -77,7 +89,15 @@ The tool needs two things from you: your Metabase's address, and a way to sign i
 
 **An API key is best.** A Metabase admin creates one in Metabase's admin settings, under API keys. Metabase's guide to [API keys](https://www.metabase.com/docs/latest/people-and-groups/api-keys) walks through it. The key belongs to a group and gets exactly that group's access, so pick a group that can see what you want to export and nothing more. A group meant for analysts is usually right. Avoid the Administrators group: an admin key can change settings and permissions, and this tool only needs to read.
 
-**Your Metabase username and password also work**, unless your organization signs in through single sign-on, in which case you need a key.
+**Your Metabase username and password also work**, as `METABASE_USERNAME` and `METABASE_PASSWORD`, unless your organization signs in through single sign-on.
+
+**Single sign-on with no key and no password** is the last resort. You can lend the tool your browser's signed-in session instead:
+
+1. Sign in to Metabase in your browser.
+2. Open the browser's developer tools (**F12**, or **Cmd+Option+I** on a Mac), find **Cookies** for your Metabase's address, and copy the value of `metabase.SESSION`.
+3. Set it as `METABASE_SESSION` instead of a key.
+
+That value is your whole signed-in session, with everything your account can do, so treat it like your password and close the terminal when you are done. It stops working when the session expires or you sign out. An API key is still better: ask an admin for one if you can.
 
 Treat the key like a password. Keep it in a password manager, and do not put it in a shared folder or anything you commit. Admins can see what each key has been used for on Metabase's [API key usage](https://www.metabase.com/docs/latest/monitor/api-key-usage) page, which is one more reason to give every person their own key.
 
@@ -273,6 +293,7 @@ Columns: region Text, sum Decimal
 | `-row-counts` | Keep estimated row counts |
 | `-no-compile` | Skip asking Metabase for the SQL behind visual-editor questions |
 | `-ca-bundle FILE` | Trust your organization's own security certificate |
+| `-workers N` | How many requests to send Metabase at once, default `4`. Lower it if your Metabase is small or busy |
 | `-timeout DURATION` | How long to wait for each answer from Metabase, default `60s` |
 
 Running `./metabase-omnibus -help` prints all of this in the terminal.
@@ -344,6 +365,16 @@ For one call in detail, Metabase's [API reference](https://www.metabase.com/docs
 
 ---
 
+## When something goes wrong
+
+**A hiccup is retried.** If Metabase is briefly busy or a connection drops, the tool waits and tries again, up to three more times, sooner or later as Metabase asks.
+
+**A failure skips one thing, not the run.** If a question, dashboard, or database still cannot be fetched, for example because your key cannot open it, the tool skips it, keeps going, and says so at the end. Each skipped item is listed with the reason, in a **Not Exported** table in the index above it. Nothing goes missing quietly.
+
+**Ctrl+C stops it** at any time. Each run writes to its own new folder, and the top-level `index.md` is written last, so a folder without one is from a run that did not finish.
+
+---
+
 ## Things it cannot do
 
 **It sees what Metabase knows, not what the database knows.** Views look like ordinary tables, and there are no indexes, stored procedures, or detail about which columns can be empty. If you need those, run [sql-x-ray](https://github.com/hihipy/sql-x-ray) against the database directly.
@@ -352,7 +383,7 @@ For one call in detail, Metabase's [API reference](https://www.metabase.com/docs
 
 **Visual-editor questions need permission to write SQL.** Translating them into SQL needs the same access as writing SQL by hand in that database. Without it, the file shows Metabase's own description of the question instead, which an assistant can still read.
 
-**Single sign-on alone is not enough.** If your organization signs in only through single sign-on and you have no API key, the tool cannot sign in. Ask an admin for a key.
+**Single sign-on needs a workaround.** If your organization signs in only through single sign-on and you have no API key, the tool cannot sign in by itself. Borrowing your browser session works, as described under [Signing in](#signing-in), but an API key from an admin is simpler and safer.
 
 ---
 
@@ -362,9 +393,11 @@ Written in Go. The interactive list is Charm's [huh](https://github.com/charmbra
 
 ```
 metabase-omnibus/
-├── main.go                  commands, flags, the database picker, writing one folder per database
+├── main.go                  commands, flags, sign-in, the database picker
+├── export.go                writing one folder per database: schema files, one file per question
+├── index.go                 every index.md, catalog.csv, and the Not Exported lists
 └── internal/
-    ├── metabase/client.go   API client: sign-in, certificates, refuses redirects and plain http
+    ├── metabase/client.go   API client: sign-in, certificates, retries, refuses redirects and plain http
     ├── schema/schema.go     database shape, in sql-x-ray's layout
     ├── content/content.go   collections, questions, dashboards, snippets
     ├── ui/                  the huh list, the typed fallback, colour, progress bar
@@ -378,6 +411,17 @@ go test ./...
 The tests run against a fake Metabase built from Metabase's Sample Database, so no server or key is needed. The fake hides a marker string everywhere a real Metabase could hand back something private: value statistics, filter defaults, people's names, connection details, personal collections, and the key itself. A test fails if any marker shows up in any exported file, and the fake fails the run outright if the tool ever asks it to run a query. GitHub runs the same tests on Windows, macOS, and Linux for every change.
 
 Every response from Metabase is read through a list of the fields the tool wants, so anything a future version of Metabase adds is dropped rather than passed along.
+
+### Making a release
+
+Tag a commit with a version and push the tag. This project uses dates for versions, year then month then release number, such as `2026.11.1`:
+
+```bash
+git tag 2026.11.1
+git push origin 2026.11.1
+```
+
+GitHub then runs the tests, builds the program for Windows, macOS, and Linux, and publishes them with their fingerprints on the Releases page. `metabase-omnibus version` reports the tag it was built from.
 
 ---
 

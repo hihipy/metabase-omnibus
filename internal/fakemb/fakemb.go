@@ -47,6 +47,12 @@ type Server struct {
 	mu        sync.Mutex
 	Requests  []string // "METHOD /path?query", in order
 	LoggedOut bool
+
+	// Deny makes a path fail with the given status every time, to test that
+	// one failure skips one item instead of ending the run.
+	Deny map[string]int
+	// RootName renames the root collection, as an instance can.
+	RootName string
 }
 
 // New starts a fake and stops it when the test ends.
@@ -91,6 +97,14 @@ func (s *Server) handle(t *testing.T, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unauthenticated", http.StatusUnauthorized)
 		return
 	}
+	s.mu.Lock()
+	status, denied := s.Deny[path]
+	root := s.RootName
+	s.mu.Unlock()
+	if denied {
+		http.Error(w, "denied by test", status)
+		return
+	}
 
 	switch {
 	case r.Method == http.MethodDelete && path == "/api/session":
@@ -111,6 +125,10 @@ func (s *Server) handle(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	case path == "/api/database/1/metadata":
 		raw(w, sampleMetadata)
 	case path == "/api/collection":
+		if root != "" {
+			raw(w, strings.Replace(collections, `"name":"Our analytics"`, `"name":"`+root+`"`, 1))
+			return
+		}
 		raw(w, collections)
 	case path == "/api/card":
 		raw(w, cardList)

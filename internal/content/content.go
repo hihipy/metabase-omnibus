@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/hihipy/metabase-omnibus/internal/metabase"
 )
@@ -40,6 +41,8 @@ type apiCollection struct {
 type apiListItem struct {
 	ID           int    `json:"id"`
 	Name         string `json:"name"`
+	Type         string `json:"type"`
+	Dataset      bool   `json:"dataset"`
 	Model        string `json:"model"` // only in /api/search results
 	CollectionID *int   `json:"collection_id"`
 	DatabaseID   *int   `json:"database_id"`
@@ -146,14 +149,16 @@ type apiSnippet struct {
 
 // Collection is one folder in Metabase.
 type Collection struct {
-	ID       int    // 0 is the root, "Our analytics"
+	ID       int    // 0 is the root collection
 	Name     string // own name
-	Path     string // "Our analytics > Team > Study"
+	Path     string // root name > Team > Study
 	Parts    []string
 	Personal bool
 }
 
-const rootName = "Our analytics"
+// defaultRootName is what Metabase calls its root collection when the API
+// does not say. Instances can rename it, and translations differ.
+const defaultRootName = "Our analytics"
 
 // Catalog is every collection, card, and dashboard the credentials can list.
 type Catalog struct {
@@ -193,6 +198,9 @@ func (c *Catalog) ForDatabase(id int) *Catalog {
 	return &cp
 }
 
+// RootName is the root collection's name, as Metabase calls it.
+func (c *Catalog) RootName() string { return c.byID[0].Name }
+
 // Counts reports how many cards and dashboards sit directly in a collection.
 func (c *Catalog) Counts(id int) (cards, dashboards int) {
 	for _, it := range c.cards {
@@ -230,6 +238,12 @@ func List(ctx context.Context, c *metabase.Client, includePersonal bool) (*Catal
 		}
 	}
 
+	rootName := defaultRootName
+	for _, col := range cols {
+		if strings.Trim(string(col.ID), `"`) == "root" && col.Name != "" {
+			rootName = col.Name
+		}
+	}
 	cat := &Catalog{byID: map[int]Collection{}, cardNames: map[int]string{}}
 	root := Collection{ID: 0, Name: rootName, Path: rootName, Parts: []string{rootName}}
 	cat.Collections = append(cat.Collections, root)
@@ -314,7 +328,14 @@ type Options struct {
 	NoCompile   bool           // skip compiling query-builder questions to SQL
 	FieldNames  map[int]string // field ID to schema.table.column, from the schema export
 	DBNames     map[int]string
+	Workers     int // requests at once; 0 means 4
 	Progress    func(done, total int, label string)
+}
+
+// Skipped is an item that could not be exported, and why. A run records
+// these instead of stopping, and the database index lists them.
+type Skipped struct {
+	Label, Name, Collection, Reason string
 }
 
 // Item is one exported question, model, metric, or dashboard: its own file,
@@ -348,70 +369,88 @@ type card struct {
 
 // Export fetches the chosen collections' cards and dashboards and renders each
 // as its own Markdown item, plus the SQL snippets those cards use.
-func Export(ctx context.Context, c *metabase.Client, cat *Catalog, keep map[int]bool, opt Options) ([]Item, string, error) {
-	var dashIDs, cardIDs []int
+func Export(ctx context.Context, c *metabase.Client, cat *Catalog, keep map[int]bool, opt Options) ([]Item, string, []Skipped, error) {
+	var dashList, cardList []apiListItem
 	for _, it := range cat.dashboards {
 		if keep[colID(it)] {
-			dashIDs = append(dashIDs, it.ID)
+			dashList = append(dashList, it)
 		}
 	}
 	for _, it := range cat.cards {
 		if keep[colID(it)] {
-			cardIDs = append(cardIDs, it.ID)
+			cardList = append(cardList, it)
 		}
 	}
-	total := len(dashIDs) + len(cardIDs)
-	done := 0
-	step := func(label string) {
-		if opt.Progress != nil {
-			opt.Progress(done, total, label)
-		}
-		done++
+	workers := opt.Workers
+	if workers <= 0 {
+		workers = 4
+	}
+	prog := &progress{total: len(dashList) + len(cardList), report: opt.Progress}
+	var skipped []Skipped
+	skip := func(label string, it apiListItem, err error) {
+		skipped = append(skipped, Skipped{label, it.Name, cat.byID[colID(it)].Path, err.Error()})
 	}
 
 	// Dashboards first, so each card can list where it appears.
-	var dashes []apiDashboard
-	onDash := map[int][]string{}
-	for _, id := range dashIDs {
-		step(fmt.Sprintf("dashboard %d", id))
+	dashes, errs := fetchAll(ctx, dashList, workers, prog, func(it apiListItem) (apiDashboard, error) {
 		var d apiDashboard
-		if err := c.Get(ctx, fmt.Sprintf("/api/dashboard/%d", id), nil, &d); err != nil {
-			return nil, "", err
-		}
+		err := c.Get(ctx, fmt.Sprintf("/api/dashboard/%d", it.ID), nil, &d)
 		if len(d.Dashcards) == 0 {
 			d.Dashcards = d.OrderedCards
 		}
-		dashes = append(dashes, d)
+		return d, err
+	})
+	if ctx.Err() != nil {
+		return nil, "", nil, ctx.Err()
+	}
+	var gotDashes []apiDashboard
+	onDash := map[int][]string{}
+	for i, d := range dashes {
+		if errs[i] != nil {
+			skip("D"+strconv.Itoa(dashList[i].ID), dashList[i], errs[i])
+			continue
+		}
+		gotDashes = append(gotDashes, d)
 		for _, dc := range d.Dashcards {
 			if dc.CardID != nil {
 				onDash[*dc.CardID] = appendUnique(onDash[*dc.CardID], fmt.Sprintf("[D%d] %s", d.ID, d.Name))
 			}
 		}
 	}
+	dashes = gotDashes
 
-	var cards []card
-	usedSnippets := map[string]bool{}
-	for _, id := range cardIDs {
-		step(fmt.Sprintf("question %d", id))
+	fetched, errs := fetchAll(ctx, cardList, workers, prog, func(it apiListItem) (card, error) {
 		var ac apiCard
 		// legacy-mbql keeps the query in the classic shape on Metabase 0.57 and
 		// later; older versions ignore it.
-		if err := c.Get(ctx, fmt.Sprintf("/api/card/%d", id), url.Values{"legacy-mbql": {"true"}}, &ac); err != nil {
-			return nil, "", err
+		if err := c.Get(ctx, fmt.Sprintf("/api/card/%d", it.ID), url.Values{"legacy-mbql": {"true"}}, &ac); err != nil {
+			return card{}, err
 		}
-		cd := card{apiCard: ac, kind: kindOf(ac), dashboards: onDash[ac.ID]}
+		cd := card{apiCard: ac, kind: kindOf(ac)}
 		cd.fillQuery()
 		if cd.sql == "" && !opt.NoCompile && len(ac.DatasetQuery) > 0 {
 			cd.compile(ctx, c)
 		}
+		return cd, nil
+	})
+	if ctx.Err() != nil {
+		return nil, "", nil, ctx.Err()
+	}
+	var cards []card
+	usedSnippets := map[string]bool{}
+	for i, cd := range fetched {
+		if errs[i] != nil {
+			it := cardList[i]
+			skip(label(kindOf(apiCard{Type: it.Type, Dataset: it.Dataset}), it.ID), it, errs[i])
+			continue
+		}
+		cd.dashboards = onDash[cd.ID]
 		for _, s := range cd.snippets {
 			usedSnippets[s] = true
 		}
 		cards = append(cards, cd)
 	}
-	if opt.Progress != nil {
-		opt.Progress(total, total, "done")
-	}
+	prog.finish()
 
 	snippetsMD := ""
 	if len(usedSnippets) > 0 {
@@ -465,7 +504,60 @@ func Export(ctx context.Context, c *metabase.Client, cat *Catalog, keep map[int]
 		}
 		return items[i].Name < items[j].Name
 	})
-	return items, snippetsMD, nil
+	return items, snippetsMD, skipped, nil
+}
+
+// progress counts finished requests across workers.
+type progress struct {
+	mu     sync.Mutex
+	done   int
+	total  int
+	report func(done, total int, label string)
+}
+
+func (p *progress) step(label string) {
+	if p.report == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.done++
+	p.report(p.done, p.total, label)
+}
+
+func (p *progress) finish() {
+	if p.report != nil {
+		p.report(p.total, p.total, "done")
+	}
+}
+
+// fetchAll runs fetch for every item with up to workers at once and returns
+// results and errors in the items' order, so the export comes out the same
+// however the requests interleave.
+func fetchAll[T any](ctx context.Context, items []apiListItem, workers int, prog *progress, fetch func(apiListItem) (T, error)) ([]T, []error) {
+	results := make([]T, len(items))
+	errs := make([]error, len(items))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < min(workers, len(items)); w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				results[i], errs[i] = fetch(items[i])
+				prog.step(items[i].Name)
+			}
+		}()
+	}
+	for i := range items {
+		if ctx.Err() != nil {
+			break
+		}
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	return results, errs
 }
 
 // FileNote explains the export; the indexes carry it in full.
