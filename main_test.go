@@ -59,8 +59,11 @@ func TestExportLayout(t *testing.T) {
 	for _, want := range []string{
 		"index.md",
 		"Sample Database/index.md",
-		"Sample Database/schema/PUBLIC.json",
-		"Sample Database/schema/ANALYTICS.json",
+		"Sample Database/schema/PUBLIC/index.md",
+		"Sample Database/schema/PUBLIC/ORDERS.json",
+		"Sample Database/schema/PUBLIC/PEOPLE.json",
+		"Sample Database/schema/ANALYTICS/index.md",
+		"Sample Database/schema/ANALYTICS/MONTHLY.json",
 		"Sample Database/questions/index.md",
 		"Sample Database/questions/Finance/index.md",
 		"Sample Database/questions/Finance/D3 Sales overview.md",
@@ -145,12 +148,53 @@ func TestUnreadableDatabaseDoesNotStopTheRun(t *testing.T) {
 
 func TestRootIndexListsFailedDatabases(t *testing.T) {
 	ok := &dbExport{db: schema.Database{ID: 1, Name: "Sales DB", Engine: "postgres"}, folder: "Sales DB",
-		schemas: []schemaFile{{name: "public", tables: 3, bytes: 400}}}
+		schemas: []schemaFile{{name: "public", tables: 3, bytes: 400, path: "schema/public/index.md", files: 4}}}
 	md := rootIndex([]*dbExport{ok}, []failedDB{{"Finance DB", "GET /api/database/2/metadata: HTTP 403"}}, "mb.example.com", false)
 	for _, want := range []string{"[Sales DB](<Sales DB/index.md>)", "## Not Exported", "| Finance DB | GET /api/database/2/metadata: HTTP 403 |"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("root index is missing %q:\n%s", want, md)
 		}
+	}
+}
+
+func TestSingleSchemaLayout(t *testing.T) {
+	_, files := exportAll(t, "-schema-layout", "single")
+	if _, ok := files["Sample Database/schema/PUBLIC.json"]; !ok {
+		t.Error("-schema-layout single should write one file per schema")
+	}
+	if _, ok := files["Sample Database/schema/PUBLIC/ORDERS.json"]; ok {
+		t.Error("-schema-layout single still wrote per-table files")
+	}
+}
+
+func TestSchemaIndex(t *testing.T) {
+	_, files := exportAll(t)
+	idx := files["Sample Database/schema/PUBLIC/index.md"]
+	for _, want := range []string{"# Schema PUBLIC", "2 tables", "| [ORDERS](<ORDERS.json>) | 4 | ID | PEOPLE |", "| [PEOPLE](<PEOPLE.json>) | 4 | ID |  |", "no data values"} {
+		if !strings.Contains(idx, want) {
+			t.Errorf("schema index is missing %q:\n%s", want, idx)
+		}
+	}
+	if !strings.Contains(files["Sample Database/index.md"], "[PUBLIC](<schema/PUBLIC/index.md>)") {
+		t.Error("the database index should link each schema to its table index")
+	}
+}
+
+// Windows and macOS treat Orders and orders as the same file name.
+func TestTableNamesThatDifferOnlyInCase(t *testing.T) {
+	doc := schema.Doc{Metadata: schema.DocMetadata{Schema: "public", Engine: "postgres"},
+		Tables: []schema.Table{{Name: "Orders"}, {Name: "orders"}}}
+	dir := t.TempDir()
+	sf, err := writeTables(doc, dir, "Sales DB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sf.files != 3 {
+		t.Errorf("wrote %d files, want two tables and an index", sf.files)
+	}
+	idx, _ := os.ReadFile(filepath.Join(dir, "index.md"))
+	if !strings.Contains(string(idx), "<Orders.json>") || !strings.Contains(string(idx), "<orders (2).json>") {
+		t.Errorf("case-only table names should get distinct files:\n%s", idx)
 	}
 }
 
@@ -223,7 +267,7 @@ func TestSchemaAndContentCommands(t *testing.T) {
 		schema, content bool
 		has, lacks      string
 	}{
-		{true, false, "schema/PUBLIC.json", "questions/"},
+		{true, false, "schema/PUBLIC/index.md", "questions/"},
 		{false, true, "questions/index.md", "schema/"},
 	} {
 		out := t.TempDir()
@@ -239,10 +283,10 @@ func TestSchemaAndContentCommands(t *testing.T) {
 
 func TestSchemaFilter(t *testing.T) {
 	_, files := exportAll(t, "-schema", "PUB*")
-	if _, ok := files["Sample Database/schema/ANALYTICS.json"]; ok {
+	if _, ok := files["Sample Database/schema/ANALYTICS/index.md"]; ok {
 		t.Error("-schema PUB* still wrote the ANALYTICS schema")
 	}
-	if _, ok := files["Sample Database/schema/PUBLIC.json"]; !ok {
+	if _, ok := files["Sample Database/schema/PUBLIC/index.md"]; !ok {
 		t.Error("-schema PUB* dropped the PUBLIC schema")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hihipy/metabase-omnibus/internal/content"
+	"github.com/hihipy/metabase-omnibus/internal/schema"
 )
 
 // Indexes: every folder gets an index.md, and each database a catalog.csv.
@@ -120,9 +121,10 @@ func (ex *dbExport) dbIndex(nodes map[string]*folderNode) string {
 		thousands(ex.tokens()), content.FileNote)
 
 	if len(ex.schemas) > 0 {
+		// The table below links each schema to its index of tables, or to its single file.
 		b.WriteString("## Schemas\n\nThe shape of each schema: tables, columns, types, and keys.\n\n| Schema | Tables | Tokens |\n| --- | ---: | ---: |\n")
 		for _, s := range ex.schemas {
-			fmt.Fprintf(&b, "| %s | %d | %s |\n", link(s.name, "schema/"+safeName(s.name)+".json"), s.tables, thousands(tokens(s.bytes)))
+			fmt.Fprintf(&b, "| %s | %d | %s |\n", link(s.name, s.path), s.tables, thousands(tokens(s.bytes)))
 		}
 		b.WriteString("\n")
 	}
@@ -136,6 +138,41 @@ func (ex *dbExport) dbIndex(nodes map[string]*folderNode) string {
 		b.WriteString("\n## Every Question and Dashboard\n\n")
 		fmt.Fprintf(&b, "The same list as a spreadsheet, for Excel or a script: %s.\n\n", link("catalog.csv", "catalog.csv"))
 		itemTable(&b, ex.items, "questions/", true)
+	}
+	return b.String()
+}
+
+// schemaIndex lists a schema's tables, one file each, with what an assistant
+// needs to pick the right ones: size, keys, and what each table points to.
+func schemaIndex(doc schema.Doc, dbName string, entries []tableEntry) string {
+	var b strings.Builder
+	total := 0
+	for _, e := range entries {
+		total += tokens(e.bytes)
+	}
+	fmt.Fprintf(&b, "# Schema %s\n\nDatabase: %s (%s). %s, about %s tokens in all.\n\n%s %s\n\n[Up](<../../index.md>)\n\n",
+		doc.Metadata.Schema, dbName, doc.Metadata.Engine, plural(len(entries), "table"), thousands(total),
+		schema.PrivacyNote, schema.Limitations)
+	b.WriteString("Each table is its own file. Read this list, then load only the tables a question touches.\n\n")
+	b.WriteString("| Table | Columns | Primary key | Points to | Tokens |\n| --- | ---: | --- | --- | ---: |\n")
+	for _, e := range entries {
+		pk := ""
+		if e.t.PrimaryKey != nil {
+			pk = strings.Join(e.t.PrimaryKey.Columns, ", ")
+		}
+		var to []string
+		seen := map[string]bool{}
+		for _, fk := range e.t.ForeignKeys {
+			target := fk.ToTable
+			if fk.ToSchema != doc.Metadata.Schema {
+				target = fk.ToSchema + "." + fk.ToTable
+			}
+			if !seen[target] {
+				seen[target] = true
+				to = append(to, target)
+			}
+		}
+		fmt.Fprintf(&b, "| %s | %d | %s | %s | %s |\n", link(e.t.Name, e.file), len(e.t.Columns), cell(pk), cell(strings.Join(to, ", ")), thousands(tokens(e.bytes)))
 	}
 	return b.String()
 }

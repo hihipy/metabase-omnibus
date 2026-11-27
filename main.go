@@ -71,7 +71,7 @@ func main() {
 }
 
 type flags struct {
-	url, out, database, schema, collection, caBundle                           string
+	url, out, database, schema, collection, caBundle, schemaLayout             string
 	all, plain, hidden, audit, text, personal, instance, rows, noCompile, http bool
 	workers                                                                    int
 	timeout                                                                    time.Duration
@@ -85,6 +85,7 @@ func run(ctx context.Context, args []string, doSchema, doContent bool) error {
 	fs.StringVar(&f.out, "out", "", "output folder (default: Downloads/metabase-omnibus-<host>)")
 	fs.StringVar(&f.database, "database", "", "databases by ID, name, or pattern, comma-separated; skips the picker")
 	fs.StringVar(&f.schema, "schema", "", `only schemas matching these names or patterns, e.g. "sales*"`)
+	fs.StringVar(&f.schemaLayout, "schema-layout", "tables", `"tables" writes one file per table with an index; "single" writes one file per schema`)
 	fs.StringVar(&f.collection, "collection", "", `only collections whose path matches these patterns, e.g. "*Finance*"`)
 	fs.BoolVar(&f.all, "all", false, "export every database without asking (the default when there is no terminal)")
 	fs.BoolVar(&f.plain, "plain", false, "type your choice instead of using the interactive list")
@@ -107,6 +108,9 @@ func run(ctx context.Context, args []string, doSchema, doContent bool) error {
 	}
 	if f.url == "" {
 		return errors.New("set METABASE_URL or pass -url")
+	}
+	if f.schemaLayout != "tables" && f.schemaLayout != "single" {
+		return fmt.Errorf("-schema-layout must be tables or single, not %q", f.schemaLayout)
 	}
 	out := os.Stderr // prompts and progress
 

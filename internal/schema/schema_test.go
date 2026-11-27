@@ -113,3 +113,23 @@ func TestFieldNames(t *testing.T) {
 		t.Errorf("field 202 = %q", got)
 	}
 }
+
+func TestForTable(t *testing.T) {
+	d := Build(fetch(t), "PUBLIC", Options{Instance: "mb.example.com"})
+	one := d.ForTable(d.Tables[0])
+	out := render(t, one)
+	if len(one.Tables) != 1 || one.Metadata.Table != "ORDERS" || one.Metadata.Schema != "PUBLIC" {
+		t.Errorf("one-table doc = %+v", one.Metadata)
+	}
+	for _, want := range []string{`"table":"ORDERS"`, `"privacy_note":"Structure only`, `"instance":"mb.example.com"`, `"foreign_keys"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("one-table file is missing %s:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "limitations") || strings.Contains(out, "object_counts") {
+		t.Errorf("one-table file should leave the long notes to the index:\n%s", out)
+	}
+	if !strings.Contains(render(t, d), `"limitations"`) {
+		t.Error("the whole-schema file lost its limitations note")
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 
 	"github.com/hihipy/metabase-omnibus/internal/content"
 	"github.com/hihipy/metabase-omnibus/internal/metabase"
@@ -26,10 +27,14 @@ type dbExport struct {
 	snippets int // bytes in questions/_snippets.md, 0 when there is none
 }
 
+// schemaFile is one schema's export: a single file, or a folder with one
+// file per table and an index. bytes covers everything written for it.
 type schemaFile struct {
 	name   string
 	tables int
 	bytes  int
+	path   string // what the database index links to, relative to the database folder
+	files  int    // files written for this schema
 }
 
 type itemFile struct {
@@ -42,7 +47,10 @@ type itemFile struct {
 func (ex *dbExport) empty() bool { return ex.files() == 0 }
 
 func (ex *dbExport) files() int {
-	n := len(ex.schemas) + len(ex.items)
+	n := len(ex.items)
+	for _, s := range ex.schemas {
+		n += s.files
+	}
 	if ex.snippets > 0 {
 		n++
 	}
@@ -70,15 +78,69 @@ func writeSchema(meta *schema.Metadata, f flags, host, dir string, ex *dbExport,
 			continue
 		}
 		doc := schema.Build(meta, s.Name, opt)
-		size, err := writeCounted(filepath.Join(dir, "schema", safeName(s.Name)+".json"),
-			func(w io.Writer) error { return schema.WriteDoc(w, doc) })
+		if f.schemaLayout == "single" {
+			rel := "schema/" + safeName(s.Name) + ".json"
+			size, err := writeCounted(filepath.Join(dir, filepath.FromSlash(rel)), func(w io.Writer) error { return schema.WriteDoc(w, doc) })
+			if err != nil {
+				return err
+			}
+			ex.schemas = append(ex.schemas, schemaFile{name: s.Name, tables: len(doc.Tables), bytes: size, path: rel, files: 1})
+			continue
+		}
+		sf, err := writeTables(doc, filepath.Join(dir, "schema", safeName(s.Name)), ex.db.Name)
 		if err != nil {
 			return err
 		}
-		ex.schemas = append(ex.schemas, schemaFile{s.Name, len(doc.Tables), size})
+		sf.path = "schema/" + safeName(s.Name) + "/index.md"
+		ex.schemas = append(ex.schemas, sf)
 	}
-	fmt.Fprintf(out, "  %s\n", plural(len(ex.schemas), "schema file"))
+	tables := 0
+	for _, s := range ex.schemas {
+		tables += s.tables
+	}
+	fmt.Fprintf(out, "  %s, %s\n", plural(len(ex.schemas), "schema"), plural(tables, "table"))
 	return nil
+}
+
+// tableEntry is one table file, for its schema's index.
+type tableEntry struct {
+	t     schema.Table
+	file  string
+	bytes int
+}
+
+// writeTables writes one file per table and an index, so an assistant can
+// read the index and then load only the tables a question touches.
+func writeTables(doc schema.Doc, dir, dbName string) (schemaFile, error) {
+	sf := schemaFile{name: doc.Metadata.Schema, tables: len(doc.Tables)}
+	var entries []tableEntry
+	used := map[string]bool{} // lowercased: Windows and macOS treat Orders and orders as one file
+	for _, t := range doc.Tables {
+		base := safeName(t.Name)
+		name := base + ".json"
+		for i := 2; used[strings.ToLower(name)]; i++ {
+			name = fmt.Sprintf("%s (%d).json", base, i)
+		}
+		used[strings.ToLower(name)] = true
+		one := doc.ForTable(t)
+		size, err := writeCounted(filepath.Join(dir, name), func(w io.Writer) error { return schema.WriteDoc(w, one) })
+		if err != nil {
+			return sf, err
+		}
+		entries = append(entries, tableEntry{t, name, size})
+		sf.bytes += size
+		sf.files++
+	}
+	size, err := writeCounted(filepath.Join(dir, "index.md"), func(w io.Writer) error {
+		_, err := io.WriteString(w, schemaIndex(doc, dbName, entries))
+		return err
+	})
+	if err != nil {
+		return sf, err
+	}
+	sf.bytes += size
+	sf.files++
+	return sf, nil
 }
 
 func writeContent(ctx context.Context, client *metabase.Client, cat *content.Catalog, fieldNames, dbNames map[int]string,

@@ -165,10 +165,11 @@ type DocMetadata struct {
 	Engine       string         `json:"engine"`
 	Database     string         `json:"database"`
 	Schema       string         `json:"schema"`
+	Table        string         `json:"table,omitempty"` // set in a one-table document
 	GeneratedAt  string         `json:"generated_at"`
-	ObjectCounts map[string]int `json:"object_counts"`
+	ObjectCounts map[string]int `json:"object_counts,omitempty"`
 	PrivacyNote  string         `json:"privacy_note"`
-	Limitations  string         `json:"limitations"`
+	Limitations  string         `json:"limitations,omitempty"`
 }
 
 type Table struct {
@@ -289,6 +290,36 @@ func Build(m *Metadata, schemaName string, opt Options) Doc {
 	sort.Slice(doc.Tables, func(i, j int) bool { return doc.Tables[i].Name < doc.Tables[j].Name })
 	doc.Metadata.ObjectCounts = map[string]int{"tables": len(doc.Tables)}
 	return doc
+}
+
+// PrivacyNote and Limitations are the full notes, for a schema's index when
+// its tables are written one per file.
+const (
+	PrivacyNote = privacyNote
+	Limitations = limitations
+)
+
+// tablePrivacyNote is the short note each one-table file carries, so a file
+// read on its own still says what it is.
+const tablePrivacyNote = "Structure only: names, types, and keys. No data values."
+
+// ForTable is a one-table document: the same table object, with metadata
+// trimmed to what a single file needs. The schema's index carries the rest.
+func (d Doc) ForTable(t Table) Doc {
+	return Doc{
+		Metadata: DocMetadata{
+			ToolName:    d.Metadata.ToolName,
+			Source:      d.Metadata.Source,
+			Instance:    d.Metadata.Instance,
+			Engine:      d.Metadata.Engine,
+			Database:    d.Metadata.Database,
+			Schema:      d.Metadata.Schema,
+			Table:       t.Name,
+			GeneratedAt: d.Metadata.GeneratedAt,
+			PrivacyNote: tablePrivacyNote,
+		},
+		Tables: []Table{t},
+	}
 }
 
 // WriteDoc writes a dump as compact JSON with one table per line: no

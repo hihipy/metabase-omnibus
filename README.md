@@ -168,7 +168,7 @@ To take everything without being asked, add `-all`. If the list does not draw pr
 
 ## What gets exported
 
-**The shape of each database.** Schema, table, and column names, column types, primary keys, and foreign keys with the column they point to. These files follow the layout of [sql-x-ray](https://github.com/hihipy/sql-x-ray), trimmed to use fewer tokens.
+**The shape of each database.** Schema, table, and column names, column types, primary keys, and foreign keys with the column they point to. One file per table, each in the layout of [sql-x-ray](https://github.com/hihipy/sql-x-ray) trimmed to use fewer tokens, with an index per schema.
 
 **Every question, model, and metric.** Its name, type, database, and last update; its SQL; the variables it takes; which saved questions and snippets it builds on; which dashboards show it; and the names and types of the columns it returns. For questions built with Metabase's visual editor, Metabase translates them into SQL without running them.
 
@@ -221,9 +221,13 @@ metabase-example-20261120-1925/
 ├── Sales DB/
 │   ├── index.md                        its schemas, its collections, and every question in a table
 │   ├── catalog.csv                     the same table of questions, for Excel or a script
-│   ├── schema/
-│   │   ├── public.json                 one file per schema
-│   │   └── reporting.json
+│   ├── schema/                         the shape of each schema
+│   │   ├── public/
+│   │   │   ├── index.md                every table: columns, keys, what it points to, size
+│   │   │   ├── orders.json             one file per table
+│   │   │   └── customers.json
+│   │   └── reporting/
+│   │       └── ...
 │   └── questions/
 │       ├── index.md                    what sits at the top level, and the collections below
 │       ├── Finance/
@@ -244,14 +248,18 @@ In `catalog.csv`, any name starting with `=`, `+`, `-`, or `@` gets a leading `'
 
 That makes the indexes the place to start with an assistant. Give it a database's `index.md` and it can tell you which questions to read next. To ask about one report, give it that report's file and the schema files it reads.
 
-A schema file is compact JSON, one table per line:
+Each table is its own file, because a schema can be large: on a real clinical-trial Metabase, one schema came to about 90,000 tokens as a single file, far more than most questions need. Give an assistant the schema's `index.md` first. It lists every table with its column count, primary key, the tables it points to, and its size, so the assistant can ask for just the tables a query touches.
+
+A table file is compact JSON:
 
 ```json
-{"metadata":{"tool_name":"metabase-omnibus","engine":"postgres","database":"Sales DB","schema":"public", ...},
+{"metadata":{"tool_name":"metabase-omnibus","engine":"postgres","database":"Sales DB","schema":"public","table":"orders", ...},
 "tables":[
 {"name":"orders","primary_key":{"columns":["id"]},"foreign_keys":[{"from_columns":["customer_id"],"to_schema":"public","to_table":"customers","to_columns":["id"]}],"columns":[{"name":"id","data_type":"int8"},{"name":"customer_id","data_type":"int8"},{"name":"total","data_type":"numeric"}]}
 ]}
 ```
+
+To get one file per schema instead, with every table in it, add `-schema-layout single`.
 
 A question file is Markdown:
 
@@ -285,6 +293,7 @@ Columns: region Text, sum Decimal
 | `-collection LIST` | Within the chosen databases, keep only the collections whose path matches |
 | `-all` | Take every database without asking, which is also what happens with no terminal |
 | `-plain` | Type your choice instead of using the interactive list |
+| `-schema-layout single` | One file per schema instead of one per table |
 | `-include-descriptions` | Keep descriptions and dashboard text cards |
 | `-include-personal` | Keep people's personal collections |
 | `-include-hidden` | Keep tables and columns an admin hid in Metabase |
