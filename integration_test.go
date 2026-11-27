@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +29,7 @@ import (
 const (
 	itEmail    = "it-admin@example.com"
 	itPassword = "Omnibus-IT-pass-7319"
-	itSQL      = "SELECT STATE, COUNT(*) AS PEOPLE_COUNT FROM PEOPLE GROUP BY STATE"
+	itSQL      = "SELECT STATE, COUNT(*) AS PEOPLE_COUNT FROM PEOPLE WHERE {{snippet: it_active_states}} GROUP BY STATE"
 	itQuestion = "IT people by state"
 	itDash     = "IT overview"
 	itSnippet  = "it_active_states"
@@ -141,9 +142,36 @@ func TestIntegration(t *testing.T) {
 		return false
 	})
 
+	// Metabase lists the Sample Database before it has synced its tables, and
+	// an export taken then has no schema to write. Wait for ORDERS to have
+	// columns.
+	until(t, "the Sample Database to sync", 3*time.Minute, func() bool {
+		var meta struct {
+			Tables []struct {
+				Name   string            `json:"name"`
+				Fields []json.RawMessage `json:"fields"`
+			} `json:"tables"`
+		}
+		if c.call("GET", fmt.Sprintf("/api/database/%d/metadata", dbID), nil, &meta) != 200 {
+			return false
+		}
+		for _, tb := range meta.Tables {
+			if tb.Name == "ORDERS" && len(tb.Fields) > 0 {
+				return true
+			}
+		}
+		return false
+	})
+
+	// The export lists only the snippets its questions use, so the question
+	// below uses this one.
+	var snippet struct {
+		ID int `json:"id"`
+	}
 	c.must("POST", "/api/native-query-snippet", map[string]any{
 		"name": itSnippet, "content": "STATE IN ('FL', 'GA')",
-	}, nil)
+	}, &snippet)
+	tag := "snippet: " + itSnippet
 
 	var card struct {
 		ID int `json:"id"`
@@ -154,7 +182,13 @@ func TestIntegration(t *testing.T) {
 		"visualization_settings": map[string]any{},
 		"dataset_query": map[string]any{
 			"type": "native", "database": dbID,
-			"native": map[string]any{"query": itSQL},
+			"native": map[string]any{
+				"query": itSQL,
+				"template-tags": map[string]any{tag: map[string]any{
+					"id": "6f1e2a7c-0d3b-4e55-9a61-1c2d3e4f5a6b", "name": tag, "display-name": "Snippet",
+					"type": "snippet", "snippet-name": itSnippet, "snippet-id": snippet.ID,
+				}},
+			},
 		},
 	}, &card)
 
@@ -225,8 +259,8 @@ func TestIntegration(t *testing.T) {
 
 	for _, want := range []string{
 		"index.md",
-		"catalog.csv",
 		"Sample Database/index.md",
+		"Sample Database/catalog.csv",
 		"Sample Database/schema/PUBLIC/index.md",
 		"Sample Database/schema/PUBLIC/ORDERS.json",
 		"Sample Database/schema/PUBLIC/PRODUCTS.json",
@@ -236,6 +270,15 @@ func TestIntegration(t *testing.T) {
 		if _, ok := files[want]; !ok {
 			t.Errorf("missing %s", want)
 		}
+	}
+
+	if t.Failed() {
+		var names []string
+		for name := range files {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		t.Logf("files written:\n%s", strings.Join(names, "\n"))
 	}
 
 	question := find(files, fmt.Sprintf("Q%d %s.md", card.ID, itQuestion))
