@@ -9,8 +9,12 @@ on:
       - "[0-9]*"
 
 # Publishing a release needs write access to the repository's contents.
+# Attesting the build signs a statement of where each file came from, which
+# needs an identity token and permission to store the attestation.
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -22,7 +26,9 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: true
+          # A release builds once, so a cache only costs time, and restoring
+          # it has failed on this runner before.
+          cache: false
 
       # A release is only as good as the commit it was cut from.
       - name: Test
@@ -55,6 +61,13 @@ jobs:
           done
           (cd dist && sha256sum * > SHA256SUMS.txt)
           ls -l dist
+
+      # Records that each file was built by this workflow from this tag, so
+      # anyone can check a download with `gh attestation verify`.
+      - name: Attest
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: "dist/*"
 
       - name: Publish
         env:

@@ -1,0 +1,72 @@
+name: Integration
+
+on:
+  # Run on pushes to main that touch the code or the module
+  push:
+    branches: [main]
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/integration.yml"
+
+  # Run on pull requests that touch the code or the module
+  pull_request:
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/integration.yml"
+
+  # Metabase changes without the code changing, so check weekly against
+  # whatever it has released since, Mondays at 06:17 UTC.
+  schedule:
+    - cron: "17 6 * * 1"
+
+  # Allow manual runs from the Actions tab
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  metabase:
+    # The newest release, and the long-term support release that slower
+    # organizations stay on.
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["metabase/metabase:latest", "metabase/metabase:v0.64-lts"]
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # A throwaway Metabase with only its built-in Sample Database. The test
+    # sets it up from scratch, so nothing here is a real credential.
+    services:
+      metabase:
+        image: ${{ matrix.image }}
+        ports:
+          - 3000:3000
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Metabase version
+        run: |
+          for i in $(seq 1 60); do
+            v=$(curl -fsS http://localhost:3000/api/session/properties 2>/dev/null | jq -r '.version.tag // empty') && [ -n "$v" ] && break
+            sleep 5
+          done
+          echo "Metabase ${v:-did not answer in 5 minutes}"
+
+      - name: Export and check
+        env:
+          MB_IT_URL: http://localhost:3000
+        run: go test -tags integration -run '^TestIntegration$' -count=1 -v .

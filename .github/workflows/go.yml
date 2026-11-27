@@ -86,3 +86,40 @@ jobs:
 
       - name: Build
         run: go build .
+
+  vulncheck:
+    # Checks the code and its dependencies against the Go vulnerability
+    # database, and fails only when a known vulnerability is in code the
+    # tool actually calls.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  fuzz:
+    # A short run of each fuzz test beyond the seed inputs the normal tests
+    # already cover. A failure prints the input that broke it; save that under
+    # testdata/fuzz to keep it as a seed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Fuzz
+        run: |
+          go test -run '^$' -fuzz '^FuzzSafeName$' -fuzztime 30s .
+          go test -run '^$' -fuzz '^FuzzCSVSafe$' -fuzztime 30s .
+          go test -run '^$' -fuzz '^FuzzParseSelection$' -fuzztime 30s ./internal/ui
