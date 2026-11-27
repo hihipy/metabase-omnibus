@@ -11,7 +11,7 @@ import (
 // refuses, no leading or trailing space or dot, no Windows device name, at
 // most maxName bytes, never empty, and stable when applied twice.
 func FuzzSafeName(f *testing.F) {
-	for _, s := range []string{"", " ", ".", "..", "Orders by state", "a/b\\c", "Q1: <draft>?", " .hidden. ", "tab\there", "\x00", "über", "\xff\xfe", "CON", "lpt1.json", "nul .md"} {
+	for _, s := range []string{"", " ", ".", "..", "Orders by state", "a/b\\c", "Q1: <draft>?", " .hidden. ", "tab\there", "\x00", "über", "\xff\xfe", "CON", "lpt1.json", "nul .md", "CON." + strings.Repeat("a", 196)} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
@@ -27,7 +27,7 @@ func FuzzSafeName(f *testing.F) {
 		if got != "_" && (strings.Trim(got, " .") != got) {
 			t.Fatalf("safeName(%q) = %q starts or ends with a space or dot", s, got)
 		}
-		if len(got) > maxName+1 { // +1 for the underscore a device name gets
+		if len(got) > maxName {
 			t.Fatalf("safeName(%q) is %d bytes", s, len(got))
 		}
 		if reservedName(got) {

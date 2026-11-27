@@ -391,6 +391,12 @@ func TestSafeNameWindowsAndLength(t *testing.T) {
 	if len(got) > maxName || !utf8.ValidString(got) {
 		t.Errorf("safeName of a 300-byte name gave %d bytes, valid UTF-8 %v", len(got), utf8.ValidString(got))
 	}
+	// A device name at the cap: the underscore must not push it over, and a
+	// second pass must change nothing.
+	atCap := safeName("CON." + strings.Repeat("a", maxName-4))
+	if len(atCap) > maxName || safeName(atCap) != atCap || !strings.HasPrefix(atCap, "CON_.") {
+		t.Errorf("device name at the cap: %d bytes, stable %v, %q", len(atCap), safeName(atCap) == atCap, atCap[:8])
+	}
 	if got := safeName(strings.Repeat("a", maxName-1) + " ." + "b"); strings.HasSuffix(got, " ") || strings.HasSuffix(got, ".") {
 		t.Errorf("a cut name ends in a space or dot: %q", got[len(got)-3:])
 	}

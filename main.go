@@ -295,26 +295,34 @@ func safeName(s string) string {
 		}
 		return r
 	}, s)
-	s = strings.Trim(s, " .")
-	if len(s) > maxName {
-		cut := maxName
-		for cut > 0 && !utf8.RuneStart(s[cut]) {
-			cut--
-		}
-		s = strings.Trim(s[:cut], " .")
-	}
+	s = capName(strings.Trim(s, " ."))
 	if s == "" {
 		return "_"
 	}
 	if reservedName(s) {
-		// CON.json becomes CON_.json, keeping any extension.
+		// CON.json becomes CON_.json, keeping any extension. The underscore
+		// can take the name one byte over the cap, so cap it again; the cut
+		// falls in the extension, after the underscore.
 		i := strings.IndexByte(s, '.')
 		if i < 0 {
 			i = len(s)
 		}
-		s = s[:i] + "_" + s[i:]
+		s = capName(s[:i] + "_" + s[i:])
 	}
 	return s
+}
+
+// capName cuts a name to maxName bytes without splitting a character, then
+// drops any space or dot the cut leaves at the end.
+func capName(s string) string {
+	if len(s) <= maxName {
+		return s
+	}
+	cut := maxName
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return strings.TrimRight(s[:cut], " .")
 }
 
 // reservedName reports whether Windows treats a name as a device. The test
